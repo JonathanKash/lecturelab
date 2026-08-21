@@ -358,7 +358,7 @@ def edit_transcript(lecture_id: int, body: TranscriptIn):
 async def upload_audio(lecture_id: int, audio: UploadFile = File(...),
                        duration_sec: float = Form(0.0), markers: str = Form("[]")):
     with db() as conn:
-        get_lecture_or_404(conn, lecture_id)
+        prev = get_lecture_or_404(conn, lecture_id)
     data = await audio.read()
     if not data:
         raise HTTPException(400, "Empty audio upload")
@@ -374,9 +374,11 @@ async def upload_audio(lecture_id: int, audio: UploadFile = File(...),
         marker_list = []
 
     with db() as conn:
+        # A new recording replaces the old one: clear the now-mismatched
+        # transcript and remove the previous audio file.
         conn.execute(
             "UPDATE lectures SET audio_file=?, audio_mime=?, duration_sec=?, "
-            "status='recorded', error=NULL WHERE id=?",
+            "status='recorded', transcript=NULL, error=NULL WHERE id=?",
             (fname, mime.split(";")[0], duration_sec or None, lecture_id))
         conn.execute("DELETE FROM markers WHERE lecture_id=?", (lecture_id,))
         for m in marker_list:
@@ -385,6 +387,11 @@ async def upload_audio(lecture_id: int, audio: UploadFile = File(...),
                 conn.execute(
                     "INSERT INTO markers (lecture_id, kind, offset_sec) VALUES (?, ?, ?)",
                     (lecture_id, kind, float(m.get("offset_sec", 0))))
+    if prev["audio_file"] and prev["audio_file"] != fname:
+        try:
+            (AUDIO_DIR / prev["audio_file"]).unlink(missing_ok=True)
+        except OSError:
+            pass
     return {"ok": True, "file": fname}
 
 

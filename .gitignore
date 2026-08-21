@@ -7,3 +7,4 @@ lecturelab.db
 audio/
 *.webm
 .claude/settings.local.json
+.playwright-mcp/
