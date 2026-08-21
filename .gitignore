@@ -8,3 +8,4 @@ audio/
 *.webm
 .claude/settings.local.json
 .playwright-mcp/
+server.log
