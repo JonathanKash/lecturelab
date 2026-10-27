@@ -3720,11 +3720,39 @@ def wake_workers() -> None:
             w.wake.set()
 
 
+ORPHAN_SWEEP_SEC = float(os.environ.get("LECTURELAB_ORPHAN_SWEEP_SEC", 60))
+
+
+def recover_orphans() -> int:
+    """Clean up after a process that died mid-job (a crash, or Windows killing it for memory):
+    its lectures go back to the queue, its batch is closed as interrupted, its Colab session is
+    stopped, and its job is queued again. The server does this every minute, not just at
+    startup, so a dead run never shows as running. Returns how many jobs were re-queued."""
+    if reset_stuck_transcribing() and COLAB_ENABLED:
+        sweep_orphans_if_idle()  # before the job is re-queued: a new batch would hold the lock
+    n = requeue_orphaned_jobs()
+    if n:
+        wake_workers()
+    return n
+
+
+def _sweep_orphans_forever() -> None:
+    while True:
+        time.sleep(ORPHAN_SWEEP_SEC)
+        try:
+            recover_orphans()
+        except Exception:
+            log.exception("orphan sweep failed")
+
+
 def start_background(watch_inboxes: bool = True) -> None:
     requeue_orphaned_jobs()
     reset_stuck_transcribing()
     if COLAB_ENABLED:  # off the startup path: WSL can take a few seconds to wake
         threading.Thread(target=sweep_orphans_if_idle, daemon=True, name="colab-sweep").start()
+    if ORPHAN_SWEEP_SEC > 0 and "orphans" not in WORKERS:  # 0 turns it off (the unit tests)
+        WORKERS["orphans"] = threading.Thread(target=_sweep_orphans_forever, daemon=True, name="orphan-sweep")
+        WORKERS["orphans"].start()
     if "transcribe" not in WORKERS:
         WORKERS["transcribe"] = Worker(["transcribe"], "transcribe-worker")
         WORKERS["transcribe"].start()

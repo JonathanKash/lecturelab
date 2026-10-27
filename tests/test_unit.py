@@ -10,6 +10,7 @@ def ll(tmp_path, monkeypatch):
     """Fresh lecturelab module pointed at a throwaway data dir."""
     monkeypatch.setenv("LECTURELAB_DATA", str(tmp_path / "data"))
     monkeypatch.setenv("LECTURELAB_LOG", str(tmp_path / "test.log"))
+    monkeypatch.setenv("LECTURELAB_ORPHAN_SWEEP_SEC", "0")  # no minute-by-minute thread outliving the test
     import lecturelab
     return importlib.reload(lecturelab)
 
@@ -1293,3 +1294,23 @@ def test_screens_that_are_not_slides_are_left_out(ll, tmp_path):
     assert max(lines, key=lambda ln: ln[1])[0].startswith("Lexical analysis")  # the title is the biggest line
     assert not ll.looks_like_slide(ll.text_lines(desk, 720, read=False))
 
+
+def test_a_run_that_died_is_cleaned_up_while_the_server_runs(ll, monkeypatch):
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()  # a pid that existed and is gone, like a run killed for memory
+    lid = _lecture(ll, "transcribing")
+    with ll.db() as con:
+        jid = con.execute("INSERT INTO jobs(kind, payload, status, owner_pid, attempts) VALUES "
+                          "('transcribe', '{}', 'running', ?, 1)", (dead.pid,)).lastrowid
+        bid = con.execute("INSERT INTO transcribe_batches(mode, lecture_ids) VALUES ('colab', ?)",
+                          (f"[{lid}]",)).lastrowid
+    swept = []
+    monkeypatch.setattr(ll, "COLAB_ENABLED", True)
+    monkeypatch.setattr(ll, "sweep_orphans_if_idle", lambda: swept.append(1) or [])
+    assert ll.recover_orphans() == 1
+    assert ll.get_job(jid)["status"] == "queued" and ll.get_lecture(lid)["status"] == "queued_transcribe"
+    with ll.db() as con:
+        assert tuple(con.execute("SELECT ended_at IS NOT NULL, ok FROM transcribe_batches WHERE id=?",
+                                 (bid,)).fetchone()) == (1, 0)
+    assert swept == [1]  # its Colab session is stopped too
+    assert ll.recover_orphans() == 0 and swept == [1]  # nothing left: no WSL call every minute
