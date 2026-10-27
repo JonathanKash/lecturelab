@@ -1314,3 +1314,13 @@ def test_a_run_that_died_is_cleaned_up_while_the_server_runs(ll, monkeypatch):
                                  (bid,)).fetchone()) == (1, 0)
     assert swept == [1]  # its Colab session is stopped too
     assert ll.recover_orphans() == 0 and swept == [1]  # nothing left: no WSL call every minute
+
+
+def test_lines_whisper_left_as_just_punctuation_are_dropped(ll):
+    lid = _lecture(ll, "transcribing")
+    ll.store_transcript(lid, {"segments": [{"start": 0, "end": 2, "text": "Next year or ."},
+                                           {"start": 2, "end": 3, "text": " . "},
+                                           {"start": 3, "end": 4, "text": "?"},
+                                           {"start": 4, "end": 6, "text": "Clase de hoy"}]}, "colab")
+    with ll.db() as con:
+        assert [r[0] for r in con.execute("SELECT text FROM segments WHERE lecture_id=? ORDER BY idx", (lid,))]             == ["Next year or .", "Clase de hoy"]

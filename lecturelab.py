@@ -383,6 +383,10 @@ MIGRATIONS = [
     ALTER TABLE lectures ADD COLUMN slides_aligned_at TEXT;
     ALTER TABLE lectures ADD COLUMN slides_error TEXT;
     """,
+    # 8: Whisper sometimes emits a lone "." for chatter it can't make out; such lines say nothing
+    """
+    DELETE FROM segments WHERE trim(text, ' .,;:?!-''"…') = '';
+    """,
 ]
 
 # Lecture lifecycle. Stages add work for each step; the UI shows these as chips.
@@ -1988,7 +1992,8 @@ def store_transcript(lecture_id: int, result: dict, source: str) -> int:
     path = DATA / "transcripts" / f"{lecture_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result), encoding="utf-8")
-    segs = result["segments"]
+    # Whisper sometimes emits a lone "." for chatter it can't make out: nothing to read there.
+    segs = [s for s in result["segments"] if re.search(r"\w", s["text"])]
     with db() as con:
         con.execute("DELETE FROM segments WHERE lecture_id=?", (lecture_id,))
         con.executemany("INSERT INTO segments(lecture_id, idx, start, end, text, words) VALUES (?,?,?,?,?,?)",
