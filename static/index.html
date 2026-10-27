@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LectureLab</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>">
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e3e1da;
+  --accent: #2f6f5e; --accent-ink: #ffffff; --warn: #a15c07; --bad: #b3261e; --ok: #2f6f5e;
+  --code: #f1efe8; --radius: 10px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9b9a94; --line: #34332f;
+          --accent: #6fbfa6; --accent-ink: #10201b; --code: #2a2a27; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+aside { border-right: 1px solid var(--line); padding: 16px; display: flex; flex-direction: column; gap: 12px; background: var(--panel); }
+aside h1 { font-size: 18px; margin: 0 0 4px; }
+aside nav a { display: block; padding: 6px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: 14px; }
+aside nav a.active, aside nav a:hover { background: var(--bg); }
+aside .section { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 8px; }
+main { padding: 24px 32px; max-width: 1100px; width: 100%; }
+h2 { margin: 0 0 16px; font-size: 22px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+button, .btn { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 14px; cursor: pointer; }
+button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button:disabled { opacity: .5; cursor: default; }
+input, textarea, select { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
+textarea { min-height: 160px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.empty { text-align: center; padding: 48px 16px; color: var(--muted); }
+.toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: 1; }
+@media (max-width: 760px) { body { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } main { padding: 16px; } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>🎓 LectureLab</h1>
+  <nav id="nav">
+    <a href="#/" data-route="library">Library</a>
+    <a href="#/courses" data-route="courses">Courses &amp; vocabulary</a>
+  </nav>
+  <div class="section">Courses</div>
+  <nav id="course-nav"></nav>
+  <div style="flex:1"></div>
+  <div class="small muted" id="health">connecting…</div>
+</aside>
+<main id="view"></main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const state = { courses: [] };
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts,
+    body: opts.body && typeof opts.body !== "string" && !(opts.body instanceof FormData) ? JSON.stringify(opts.body) : opts.body });
+  if (!res.ok) {
+    const text = await res.text();
+    let msg = text || res.statusText;
+    try { const d = JSON.parse(text).detail; msg = typeof d === "string" ? d : JSON.stringify(d); } catch {}
+    throw new Error(msg);
+  }
+  return res.headers.get("content-type")?.includes("json") ? res.json() : res.text();
+}
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 2200); }
+
+async function loadCourses() {
+  state.courses = await api("/api/courses");
+  $("#course-nav").innerHTML = state.courses.map(c =>
+    `<a href="#/course/${c.id}" data-route="course-${c.id}" title="${esc(c.name)}"><b>${esc(c.code)}</b> <span class="muted">${esc(c.name)}</span></a>`).join("");
+}
+
+const views = {
+  library() {
+    return `<h2>Library</h2><div class="card empty">No lectures yet.</div>`;
+  },
+  courses() {
+    return `<h2>Courses &amp; vocabulary</h2>
+      <p class="muted small">One term per line: names, jargon, function names. These are fed to Whisper and to the note prompts so technical terms come out right.</p>
+      <div class="grid2">${state.courses.map(c => `
+        <div class="card" data-course="${c.id}">
+          <div class="row" style="margin-bottom:8px"><b>${esc(c.code)}</b>
+            <input class="course-name" value="${esc(c.name)}" style="flex:1" aria-label="Course name"></div>
+          <textarea class="course-vocab" aria-label="${esc(c.code)} vocabulary">${esc(c.vocabulary)}</textarea>
+          <div class="row" style="margin-top:8px;justify-content:space-between">
+            <span class="small muted term-count">${c.vocabulary ? c.vocabulary.split("\n").length : 0} terms</span>
+            <button class="save-course">Save</button></div>
+        </div>`).join("")}</div>`;
+  },
+  course(id) {
+    const c = state.courses.find(c => c.id == id);
+    if (!c) return `<h2>Not found</h2>`;
+    return `<h2>${esc(c.code)} · ${esc(c.name)}</h2><div class="card empty">No lectures yet.</div>`;
+  },
+};
+
+function bind() {
+  document.querySelectorAll(".save-course").forEach(btn => btn.onclick = async () => {
+    const card = btn.closest("[data-course]");
+    const saved = await api(`/api/courses/${card.dataset.course}`, { method: "PUT",
+      body: { name: $(".course-name", card).value, vocabulary: $(".course-vocab", card).value } });
+    // Update just this card so unsaved edits in the other cards survive.
+    $(".course-vocab", card).value = saved.vocabulary;
+    $(".course-name", card).value = saved.name;
+    $(".term-count", card).textContent = `${saved.vocabulary ? saved.vocabulary.split("\n").length : 0} terms`;
+    await loadCourses();
+    toast("Saved");
+  });
+}
+
+function render() {
+  const [, route = "", arg] = location.hash.slice(1).split("/");
+  const key = route || "library";
+  $("#view").innerHTML = (Object.hasOwn(views, key) ? views[key] : views.library)(arg);
+  document.querySelectorAll("aside nav a").forEach(a =>
+    a.classList.toggle("active", a.dataset.route === (arg ? `${key}-${arg}` : key)));
+  bind();
+}
+
+async function heartbeat() {
+  try { const h = await api("/api/health"); $("#health").textContent = `server v${h.version} · ok`; }
+  catch { $("#health").textContent = "server unreachable"; }
+}
+
+window.addEventListener("hashchange", render);
+window.addEventListener("unhandledrejection", e => { toast("Error: " + (e.reason?.message || e.reason)); });
+(async () => { await loadCourses(); render(); heartbeat(); setInterval(heartbeat, 15000); })();
+</script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+[project]
+name = "lecturelab"
+version = "2.0.0"
+description = "Turns lecture recordings into notes, flashcards and quizzes. Free: Colab GPU + Claude Code on a Max plan."
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi==0.162.0",
+    "uvicorn[standard]==0.54.0",
+    "python-multipart==0.0.32",
+    "httpx==0.28.1",
+    "python-dotenv==1.2.4",
+    # yt-dlp is a floor, not a pin: sites change and old versions stop working.
+    "yt-dlp>=2026.10.26",
+    "gdown==6.4.2",
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.8.4",
+    "pymupdf==2.0",
+    "python-pptx==1.0.2",
+    "rapidocr==3.10.0",
+    "onnxruntime==1.31.1",
+    "markdown-it-py==4.2.0",
+    "mdit-py-plugins==0.6.1",
+    "Pygments==2.21.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1", "playwright==1.64.1"]
+
+[project.scripts]
+lecturelab = "cli:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["lecturelab", "cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

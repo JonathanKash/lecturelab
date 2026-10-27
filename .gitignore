@@ -1,0 +1,55 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Secrets: never commit
+.env
+.env.*
+!.env.example
+*cookies*.txt
+cookies/
+token*.json
+*.pem
+
+# Everything the app produces: recordings, transcripts, slides, db, caches
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite*
+
+# Media and class material, wherever it lands
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.opus
+*.avi
+*.m4v
+*.aac
+*.srt
+*.vtt
+*.pdf
+*.ppt
+*.pptx
+*.key
+*.docx
+*.zip
+transcripts/
+LectureLab Inbox/
+
+# Logs and tool output
+server.log*
+*.log
+.playwright-mcp/
+test-results/
+.claude/settings.local.json
