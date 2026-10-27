@@ -15,6 +15,8 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -192,8 +194,17 @@ def run(cmd: list, timeout: float = 2 * 3600, **kw) -> subprocess.CompletedProce
     r = subprocess.run([str(c) for c in cmd], creationflags=NO_WINDOW, stdin=subprocess.DEVNULL,
                        timeout=timeout, **kw)
     if r.returncode != 0:
-        err = r.stderr.decode("utf-8", "replace") if isinstance(r.stderr, bytes) else (r.stderr or "")
-        raise RuntimeError(f"{Path(str(cmd[0])).name} failed ({r.returncode}): {err.strip()[-1500:]}")
+        dec = lambda b: b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")  # noqa: E731
+        # Some tools (the colab CLI) print their errors on stdout, so include text stdout too. Binary
+        # stdout (ffmpeg piping PCM) is data, not a message: leave it out. The colab CLI's error
+        # URLs carry short-lived runtime tokens: never let those reach server.log or the UI.
+        out = r.stdout[-4000:] if isinstance(r.stdout, str) else ""
+        err = (out.strip() + "\n" + dec(r.stderr).strip()).strip()  # stderr last: it survives the cut below
+        err = re.sub(r"(?i)\b((?:token|authuser|key|code|state)=)[^&\s'\"]+", r"\1<redacted>", err)
+        err = re.sub(r"(?i)(\"(?:\w*token|key|secret)\"\s*:\s*\")[^\"]+", r"\1<redacted>", err)
+        # wsl.exe -d <distro> -e <tool> ...: name the tool, not "wsl.exe" or "-d"
+        tool = cmd[4] if Path(str(cmd[0])).name == "wsl.exe" and len(cmd) > 4 else cmd[0]
+        raise RuntimeError(f"{Path(str(tool)).name} failed ({r.returncode}): {err[-1500:]}")
     return r
 
 
@@ -307,6 +318,32 @@ MIGRATIONS = [
         found_at    TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (course_id, key)           -- the same embed can appear in two courses
     );
+    """,
+    """
+    CREATE TABLE transcribe_batches (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        mode          TEXT NOT NULL,           -- colab | local
+        gpu           TEXT,                    -- T4 / L4 on Colab, the model name locally
+        lecture_ids   TEXT NOT NULL,           -- JSON list
+        done_ids      TEXT NOT NULL DEFAULT '[]',
+        audio_sec     REAL,                    -- total audio in the batch
+        units_before  REAL,
+        units_after   REAL,
+        wall_sec      REAL,
+        ok            INTEGER,
+        error         TEXT,
+        started_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        ended_at      TEXT
+    );
+    """,
+    """
+    -- billing rate while the session ran (0 on the free tier)
+    ALTER TABLE transcribe_batches ADD COLUMN units_per_hour REAL;
+    """,
+    """
+    -- the Canvas page an embed was found on; opened in the LectureLab browser before a
+    -- Kaltura/Panopto download so the player's own login cookies get set
+    ALTER TABLE canvas_items ADD COLUMN page_link TEXT;
     """,
 ]
 
@@ -633,6 +670,8 @@ def run_job(job: dict) -> None:
         result = JOB_HANDLERS[job["kind"]](job)
         job_update(job["id"], status="done", result=result or {}, error=None, progress=None, payload=scrubbed)
         log.info("job %s %s done: %s", job["id"], job["kind"], result)
+    except RetryLater as e:  # the job re-queued itself with a retry time; leave that in place
+        log.info("job %s %s deferred: %s", job["id"], job["kind"], e)
     except Exception as e:
         log.exception("job %s %s failed", job["id"], job["kind"])
         job_update(job["id"], status="error", error=str(e)[:4000], progress=None, payload=scrubbed)
@@ -907,7 +946,11 @@ def classify_url(url: str) -> str:
     return "url"
 
 
-def download_url(url: str, dest: Path, passcode: str | None = None, progress=None, cookies_browser: str | None = None) -> list[tuple[Path, dict]]:
+_DRIVE_FILE_ID = re.compile(r"(?:/file/(?:u/\d+/)?d/|[?&]id=)([\w-]{20,})")
+
+
+def download_url(url: str, dest: Path, passcode: str | None = None, progress=None,
+                 cookiefile: Path | None = None) -> list[tuple[Path, dict]]:
     """Fetch a URL into dest. Returns [(file, metadata)]. Errors carry the tool's own message."""
     dest.mkdir(parents=True, exist_ok=True)
     if classify_url(url) == "drive":
@@ -916,7 +959,10 @@ def download_url(url: str, dest: Path, passcode: str | None = None, progress=Non
             files = gdown.download_folder(url, output=str(dest), quiet=True) or []
             got = [Path(f) for f in files if Path(f).suffix.lower() in MEDIA_EXTS]
         else:
-            f = gdown.download(url, output=str(dest) + os.sep, quiet=True, fuzzy=True)
+            m = _DRIVE_FILE_ID.search(url)
+            if not m:
+                raise RuntimeError(f"Google Drive: can't find a file id in {url}")
+            f = gdown.download(id=m[1], output=str(dest) + os.sep, quiet=True)
             got = [Path(f)] if f else []
         if not got:
             raise RuntimeError("Google Drive: nothing downloadable at that link. Is it shared as "
@@ -937,8 +983,8 @@ def download_url(url: str, dest: Path, passcode: str | None = None, progress=Non
     }
     if passcode:
         opts["videopassword"] = passcode
-    if cookies_browser:
-        opts["cookiesfrombrowser"] = (cookies_browser,)
+    if cookiefile:
+        opts["cookiefile"] = str(cookiefile)
     if progress:
         last = [0.0]
 
@@ -954,9 +1000,9 @@ def download_url(url: str, dest: Path, passcode: str | None = None, progress=Non
             info = ydl.extract_info(url, download=True)
         except yt_dlp.utils.DownloadError as e:
             msg = f"yt-dlp: {str(e).removeprefix('ERROR: ')}"
-            if "cookie database" in msg.lower() or "decrypt" in msg.lower():
-                msg += (f"\nCouldn't read {cookies_browser}'s cookies (Chrome locks and encrypts them on Windows)."
-                        " Set LECTURELAB_COOKIES_BROWSER=firefox in .env and sign in to Canvas in Firefox once.")
+            if cookiefile and re.search(r"(?i)\b(401|403|login|sign in|private|permission)\b", msg):
+                msg += ("\nThe player didn't accept the LectureLab browser's UF session. If Canvas shows"
+                        " 'needs sign-in', click Connect Canvas; otherwise open the video once in that browser.")
             elif classify_url(url) == "zoom":
                 msg += ("\nFor Zoom this usually means the link expired or was deleted, the passcode is missing or"
                         " wrong, or the host limited it to signed-in UF users. Open the link in a browser: if it"
@@ -977,6 +1023,34 @@ def download_url(url: str, dest: Path, passcode: str | None = None, progress=Non
     return out
 
 
+_LOGIN_HOSTS = ("kaltura.com", "panopto.com", "instructure.com", "ufl.edu")
+
+
+def needs_login_cookies(url: str) -> bool:
+    """Links that may sit behind UF login: matched on the host, not anywhere in the URL."""
+    from urllib.parse import urlsplit
+    u = urlsplit(url)
+    host = (u.hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in _LOGIN_HOSTS) or "/mediasite/" in u.path.lower()
+
+
+def job_cookie_file(job_id: int) -> Path:
+    """Per-job cookie file for yt-dlp; the job deletes it when it's done."""
+    return DATA / "secrets" / f"cookies-job{job_id}.txt"
+
+
+def _login_cookies_for(url: str, path: Path) -> Path | None:
+    """A pasted Kaltura/Panopto/Mediasite link may need the UF session too, if Canvas is connected."""
+    if not needs_login_cookies(url) or canvas_state().get("state") != "connected":
+        return None
+    try:
+        with CanvasSession() as cs:
+            return cs.export_cookies(path)
+    except Exception as e:
+        log.warning("could not export Canvas cookies: %s", e)
+        return None
+
+
 def job_ingest(job: dict) -> dict:
     """payload: {path | url, kind?, course_id?, title?, date?, passcode?, delete_after?}"""
     p = job["payload"]
@@ -985,16 +1059,18 @@ def job_ingest(job: dict) -> dict:
     if p.get("url"):
         kind = p.get("kind") or classify_url(p["url"])
         tmp = DATA / "downloads" / f"job{job['id']}"
+        cookies = job_cookie_file(job["id"])
         try:
             say("downloading")
             files = download_url(p["url"], tmp, passcode=p.get("passcode"), progress=say,
-                                 cookies_browser=p.get("cookies_browser"))
+                                 cookiefile=_login_cookies_for(p["url"], cookies))
             for i, (f, meta) in enumerate(files, 1):
                 say(f"processing {i}/{len(files)}: {f.name}")
                 title = p.get("title") if len(files) == 1 else None
                 results.append(ingest_file(f, kind=kind, url=meta.get("url") or p["url"], course_id=p.get("course_id"),
                                            title=title, date=p.get("date"), meta=meta))
         finally:
+            cookies.unlink(missing_ok=True)
             shutil.rmtree(tmp, ignore_errors=True)
     else:
         say("processing")
@@ -1189,48 +1265,270 @@ class CanvasError(RuntimeError):
     pass
 
 
-def canvas_config() -> tuple[str, str]:
-    # Re-read .env on each call so a token added while the server runs is picked up, but only
-    # these two keys: reloading everything would clobber LECTURELAB_* set by tests or the task.
-    from dotenv import dotenv_values
-    env = {**dotenv_values(ROOT / ".env"), **{k: v for k, v in os.environ.items() if k.startswith("CANVAS_")}}
-    base = (env.get("CANVAS_BASE_URL") or "https://ufl.instructure.com").rstrip("/")
-    token = (env.get("CANVAS_TOKEN") or "").strip()
-    if not token:
-        raise CanvasError("No Canvas token yet. In Canvas: Account > Settings > New Access Token, then put it in "
-                          f"{ROOT / '.env'} as CANVAS_TOKEN=...")
-    return base, token
+class CanvasNeedsSignIn(CanvasError):
+    pass
 
 
-def canvas_get(path: str, params: dict | None = None, paginate: bool = True):
-    """GET a Canvas API path (or absolute URL), following Link: rel=next pagination."""
-    import httpx
-    base, token = canvas_config()
-    url = path if path.startswith("http") else f"{base}/api/v1/{path.lstrip('/')}"
-    params = {"per_page": 100, **(params or {})}
-    out = []
-    with httpx.Client(headers={"Authorization": f"Bearer {token}"}, timeout=30, follow_redirects=True) as cx:
+# UF students can't make API tokens, so LectureLab keeps its own browser profile: you sign in
+# there once with GatorLink + Duo, and LectureLab reads the Canvas API with that session the way
+# Canvas's own web pages do (GET only). No password is ever asked for or stored.
+CANVAS_BASE = os.environ.get("CANVAS_BASE_URL", "https://ufl.instructure.com").rstrip("/")
+PROFILE_DIR = DATA / "browser-profile"
+# Canvas and UF login use session-only cookies, which Chromium drops when the browser closes.
+# They're kept here between launches so one sign-in lasts until Canvas itself expires it.
+SESSION_COOKIES = DATA / "secrets" / "canvas-session.json"
+_canvas_local = threading.local()
+
+
+def canvas_state() -> dict:
+    return meta_get("canvas_state", {"state": "not_connected"})
+
+
+def set_canvas_state(state: str, **info) -> None:
+    prev = canvas_state().get("state")
+    meta_set("canvas_state", {"state": state, "checked_at": datetime.now().isoformat(timespec="seconds"), **info})
+    if state == "needs_signin" and prev != "needs_signin":
+        log.warning("Canvas session expired: needs sign-in (inbox folders keep working)")
+        notify("LectureLab: Canvas needs sign-in",
+               "Your Canvas session expired. Open LectureLab and click Connect Canvas. Inbox folders still work.")
+
+
+def notify(title: str, body: str) -> None:
+    """Best-effort Windows toast. Off in tests (LECTURELAB_NOTIFY=off)."""
+    if os.environ.get("LECTURELAB_NOTIFY") == "off" or os.name != "nt":
+        return
+    esc_ = lambda t: t.replace("&", "&amp;").replace("<", "&lt;").replace("'", "''")  # noqa: E731
+    script = f"""
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$x = New-Object Windows.Data.Xml.Dom.XmlDocument
+$x.LoadXml('<toast><visual><binding template="ToastGeneric"><text>{esc_(title)}</text><text>{esc_(body)}</text></binding></visual></toast>')
+$app = '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($x))
+"""
+    try:
+        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                         creationflags=NO_WINDOW, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.warning("notification failed: %s", e)
+
+
+def _prepare_profile() -> None:
+    """Turn off the profile's password manager so it never offers to save the UF password."""
+    prefs = PROFILE_DIR / "Default" / "Preferences"
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8")) if prefs.exists() else {}
+    except ValueError:
+        data = {}
+    data["credentials_enable_service"] = False
+    data.setdefault("profile", {})["password_manager_enabled"] = False
+    prefs.write_text(json.dumps(data), encoding="utf-8")
+
+
+class CanvasSession:
+    """The LectureLab browser profile, open headless, used to read Canvas. One at a time
+    (a profile can't be opened twice); nested `with` blocks in a thread reuse the open one."""
+
+    def __init__(self, headless: bool = True):
+        self.headless = headless
+        self.lock = FileLock(DATA / "browser.lock")
+        self.nested = False
+
+    def __enter__(self):
+        if getattr(_canvas_local, "session", None):
+            self.nested = True
+            return _canvas_local.session
+        for _ in range(240):
+            if self.lock.acquire():
+                break
+            time.sleep(0.5)
+        else:
+            raise CanvasError("the LectureLab browser is busy (a sign-in window may be open)")
+        self.pw = self.ctx = None
+        try:
+            from playwright.sync_api import sync_playwright
+            _prepare_profile()
+            self.pw = sync_playwright().start()
+            self.ctx = self.pw.chromium.launch_persistent_context(
+                str(PROFILE_DIR), headless=self.headless, accept_downloads=False,
+                args=["--disable-features=PasswordManagerOnboarding,AutofillServerCommunication"])
+            self.restore_session_cookies()
+        except Exception:
+            self._shutdown(save=False)  # a half-open browser would keep the profile locked
+            raise
+        _canvas_local.session = self
+        return self
+
+    def __exit__(self, *exc):
+        if self.nested:
+            return
+        _canvas_local.session = None
+        self._shutdown(save=True)
+
+    def _shutdown(self, save: bool) -> None:
+        """Close the browser and Playwright and free the lock, each step even if an earlier one fails."""
+        try:
+            if save and self.ctx:
+                try:
+                    self.save_session_cookies()
+                except Exception as e:
+                    log.warning("could not save the Canvas session cookies: %s", e)
+            for step in (self.ctx and self.ctx.close, self.pw and self.pw.stop):
+                if step:
+                    try:
+                        step()
+                    except Exception as e:
+                        log.warning("closing the LectureLab browser: %s", e)
+        finally:
+            self.lock.release()
+
+    def get(self, path: str, params: dict | None = None, paginate: bool = True, quiet_auth: bool = False):
+        """GET /api/v1/<path> with the session, following Link: rel=next pagination.
+        quiet_auth: a signed-out answer raises without marking Canvas 'needs sign-in' (used
+        while you're signing in, so it doesn't notify you mid-login)."""
+        from urllib.parse import urlencode
+        if path.startswith("http"):
+            if not path.startswith(CANVAS_BASE + "/api/v1/"):
+                raise CanvasError(f"refusing a non-API Canvas URL: {path}")
+            url = path
+        else:
+            url = f"{CANVAS_BASE}/api/v1/{path.lstrip('/')}?" + urlencode({"per_page": 100, **(params or {})}, doseq=True)
+        out = []
         while url:
             for attempt in range(5):
-                r = cx.get(url, params=params)
+                r = self.ctx.request.get(url, headers={"Accept": "application/json+canvas-string-ids, application/json"},
+                                         max_redirects=0, timeout=30_000)
                 # Canvas also answers 403 when throttling; that must not look like "no items".
-                if r.status_code == 403 and "rate limit" in r.text.lower():
+                if r.status == 403 and "rate limit" in r.text().lower():
                     time.sleep(2 ** attempt)
                     continue
                 break
             else:
-                raise CanvasError("Canvas kept rate-limiting the scan; try again in a few minutes.")
-            if r.status_code == 401:
-                raise CanvasError("Canvas rejected the token (401). It may have expired; generate a new one.")
-            if r.status_code in (403, 404):
+                raise CanvasError("Canvas kept rate-limiting; try again in a few minutes.")
+            if r.status in (403, 404):
                 return [] if paginate else None  # tab hidden by the instructor, or no access: not an error
-            r.raise_for_status()
+            # Signed out: the API answers 401, or bounces to the SSO login page. Anything else that
+            # isn't JSON (a 5xx, a maintenance page) is an outage, not an expired session: it must
+            # not flip the sticky "needs sign-in" state.
+            html = "json" not in (r.headers.get("content-type") or "")
+            if r.status == 401 or 300 <= r.status < 400 or (
+                    r.ok and html and re.search(r"(?i)log\s*in|sign\s*in|/login|login\.ufl\.edu", r.text())):
+                if not quiet_auth:
+                    set_canvas_state("needs_signin", reason=f"HTTP {r.status} from {url.split('?')[0]}")
+                raise CanvasNeedsSignIn("Canvas needs sign-in: click Connect Canvas in LectureLab")
+            if not r.ok or html:
+                raise CanvasError(f"Canvas API answered {r.status}{' (not JSON)' if html else ''} for "
+                                  f"{url.split('?')[0]}; Canvas may be down, try again later")
             data = r.json()
             if not paginate or not isinstance(data, list):
                 return data
             out.extend(data)
-            url, params = r.links.get("next", {}).get("url"), None
-    return out
+            url = _next_link(r.headers.get("link"))
+        return out
+
+    def whoami(self, quiet_auth: bool = False) -> dict:
+        me = self.get("users/self", paginate=False, quiet_auth=quiet_auth) or {}
+        set_canvas_state("connected", user=me.get("name"))
+        return me
+
+    def warm(self, url: str) -> None:
+        """Open a Canvas page so embedded players (Kaltura, Panopto) run their LTI sign-in and
+        set their own cookies in this profile."""
+        page = self.ctx.new_page()
+        try:
+            page.goto(url, wait_until="networkidle", timeout=60_000)
+            page.wait_for_timeout(3000)
+        except Exception as e:
+            log.warning("warming %s: %s", url, e)
+        finally:
+            page.close()
+
+    def save_session_cookies(self, path: Path = SESSION_COOKIES) -> None:
+        keep = [c for c in self.ctx.cookies() if c.get("expires", -1) < 0]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(keep), encoding="utf-8")
+        os.replace(tmp, path)
+
+    def restore_session_cookies(self, path: Path = SESSION_COOKIES) -> int:
+        """Add back saved session cookies the profile lost on close (never overwrites newer ones)."""
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        have = {(c["name"], c["domain"], c["path"]) for c in self.ctx.cookies()}
+        add = [c for c in saved if (c["name"], c["domain"], c["path"]) not in have]
+        if add:
+            self.ctx.add_cookies(add)
+        return len(add)
+
+    def export_cookies(self, path: Path) -> Path:
+        """Write the profile's cookies as a Netscape cookies.txt for yt-dlp --cookies. Callers use a
+        per-job path (job_cookie_file) and delete it afterwards: no long-lived cookie file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(netscape_cookies(self.ctx.cookies()), encoding="utf-8")
+        return path
+
+    def httpx_cookies(self):
+        import httpx
+        jar = httpx.Cookies()
+        for c in self.ctx.cookies():
+            jar.set(c["name"], c["value"], domain=c["domain"], path=c["path"])
+        return jar
+
+
+def _next_link(header: str | None) -> str | None:
+    for part in (header or "").split(","):
+        m = re.match(r'\s*<([^>]+)>;\s*rel="next"', part)
+        if m:
+            return m[1]
+    return None
+
+
+def netscape_cookies(cookies: list[dict]) -> str:
+    lines = ["# Netscape HTTP Cookie File", "# Written by LectureLab from its browser profile. Do not share."]
+    for c in cookies:
+        domain = c["domain"]
+        lines.append("\t".join([domain, "TRUE" if domain.startswith(".") else "FALSE", c.get("path") or "/",
+                                "TRUE" if c.get("secure") else "FALSE",
+                                str(int(c["expires"])) if c.get("expires", -1) and c.get("expires", -1) > 0 else "0",
+                                c["name"], c["value"]]))
+    return "\n".join(lines) + "\n"
+
+
+def canvas_get(path: str, params: dict | None = None, paginate: bool = True):
+    """GET a Canvas API path with the LectureLab profile's session (reuses an open one)."""
+    if not getattr(_canvas_local, "session", None):
+        canvas_ready()  # not connected or needs sign-in: say so without opening a browser
+    with CanvasSession() as cs:
+        return cs.get(path, params, paginate)
+
+
+def canvas_login(timeout_min: float = 10) -> dict:
+    """Open the LectureLab browser so you can sign in with GatorLink + Duo yourself. Returns once
+    the Canvas API answers as you, or after timeout_min. Never fills in anything."""
+    with CanvasSession(headless=False) as cs:
+        page = cs.ctx.pages[0] if cs.ctx.pages else cs.ctx.new_page()
+        page.goto(CANVAS_BASE + "/", wait_until="domcontentloaded")
+        end = time.time() + timeout_min * 60
+        while time.time() < end:
+            try:
+                me = cs.get("users/self", paginate=False, quiet_auth=True)
+                if me and me.get("id"):
+                    set_canvas_state("connected", user=me.get("name"))
+                    log.info("Canvas connected as %s", me.get("name"))
+                    page.wait_for_timeout(1500)
+                    return me
+            except CanvasNeedsSignIn:
+                pass
+            if not cs.ctx.pages:
+                break  # you closed the window
+            time.sleep(2)
+        set_canvas_state("needs_signin" if canvas_state().get("state") != "not_connected" else "not_connected",
+                         reason="sign-in window closed or timed out")
+        raise CanvasError("Canvas sign-in didn't finish (window closed or timed out)")
 
 
 def canvas_courses() -> list[dict]:
@@ -1259,6 +1557,9 @@ _EMBEDS = [
     ("youtube", re.compile(r"(?:youtube(?:-nocookie)?\.com/(?:embed/|watch\?v=)|youtu\.be/)([\w-]{11})", re.I)),
     ("zoom", re.compile(r"https?://[\w.-]*zoom\.us/rec/(?:share|play)/[\w.\-~%]+", re.I)),
     ("media_object", re.compile(r"media_objects(?:_iframe)?/(m-[\w]+)", re.I)),
+    # Some courses keep recordings in a shared Google Drive folder linked from a module.
+    ("drive_folder", re.compile(r"drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]{20,})", re.I)),
+    ("drive", re.compile(r"drive\.google\.com/(?:file/(?:u/\d+/)?d/|open\?id=|uc\?(?:[^\"'<> ]*&)?id=)([\w-]{20,})", re.I)),
 ]
 _KALTURA_PARTNER = re.compile(r"(\d{6,8})\.kaf\.kaltura\.com|/p/(\d{6,8})/|partner_?id[/=](\d{6,8})", re.I)
 
@@ -1283,6 +1584,11 @@ def scan_html_for_media(html: str, page_url: str) -> list[dict]:
                 found.append({"key": f"youtube:{m[1]}", "kind": kind, "url": f"https://www.youtube.com/watch?v={m[1]}"})
             elif kind == "media_object":
                 found.append({"key": f"media_object:{m[1]}", "kind": kind, "url": f"media_object:{m[1]}"})
+            elif kind == "drive_folder":
+                found.append({"key": f"drive_folder:{m[1]}", "kind": kind,
+                              "url": f"https://drive.google.com/drive/folders/{m[1]}"})
+            elif kind == "drive":
+                found.append({"key": f"drive:{m[1]}", "kind": kind, "url": f"https://drive.google.com/file/d/{m[1]}/view"})
             else:
                 found.append({"key": f"{kind}:{m[0] if kind == 'zoom' else m[1]}", "kind": kind, "url": m[0]})
     for f in found:
@@ -1290,8 +1596,43 @@ def scan_html_for_media(html: str, page_url: str) -> list[dict]:
     return found
 
 
+def drive_list_folder(folder_id: str) -> list[dict]:
+    """The files in a public Drive folder (recursively), listed without downloading anything."""
+    import gdown
+    with tempfile.TemporaryDirectory() as tmp:
+        files = gdown.download_folder(id=folder_id, output=tmp, skip_download=True, quiet=True) or []
+    return [{"id": f.id, "path": f.path} for f in files]
+
+
+def expand_drive_folders(items: dict[str, dict]) -> None:
+    """Replace each linked Drive folder with one item per recording in it, so recordings are pulled
+    one at a time (a semester folder is many GB). A folder that can't be listed stays as it is."""
+    for key, it in list(items.items()):
+        if it["kind"] != "drive_folder":
+            continue
+        try:
+            listing = drive_list_folder(key.split(":", 1)[1])
+        except Exception as e:
+            log.warning("couldn't list the Drive folder linked at %s: %s", it.get("page_url"), e)
+            continue
+        del items[key]
+        for f in listing:
+            if Path(f["path"]).suffix.lower() in MEDIA_EXTS:
+                items.setdefault(f"drive:{f['id']}", {
+                    "key": f"drive:{f['id']}", "kind": "drive", "title": Path(f["path"]).stem,
+                    "url": f"https://drive.google.com/file/d/{f['id']}/view",
+                    "page_url": f"{it.get('page_url')} > {f['path']}", "page_link": it.get("page_link")})
+
+
 def canvas_scan_course(course: dict, progress=None) -> dict:
     """Find recordings in a course's Files, Modules, Pages and Announcements. Records new ones."""
+    canvas_ready()  # not connected or needs sign-in: no browser, no "expired" toast
+    with CanvasSession():
+        return _canvas_scan_course(course, progress)
+
+
+def _canvas_scan_course(course: dict, progress=None) -> dict:
+    from urllib.parse import quote
     cid = course["canvas_id"]
     say = progress or (lambda m: None)
     items: dict[str, dict] = {}
@@ -1321,6 +1662,7 @@ def canvas_scan_course(course: dict, progress=None) -> dict:
             elif it.get("type") in ("ExternalUrl", "ExternalTool"):
                 for m in scan_html_for_media(it.get("external_url") or "", where):
                     m.setdefault("title", it.get("title"))
+                    m["page_link"] = it.get("html_url")
                     add(m)
             elif it.get("type") == "Page" and it.get("page_url"):
                 pages_to_read.add(it["page_url"])
@@ -1328,70 +1670,68 @@ def canvas_scan_course(course: dict, progress=None) -> dict:
     for p in canvas_get(f"courses/{cid}/pages"):
         pages_to_read.add(p["url"])
     for slug in sorted(pages_to_read):
-        p = canvas_get(f"courses/{cid}/pages/{slug}", paginate=False)
+        p = canvas_get(f"courses/{cid}/pages/{quote(slug, safe='')}", paginate=False)  # a slug must not escape the path
         if p:
             for m in scan_html_for_media(p.get("body") or "", f"page: {p.get('title')}"):
                 m.setdefault("title", p.get("title"))
                 m.setdefault("created_at", p.get("created_at"))
+                m["page_link"] = p.get("html_url") or f"{CANVAS_BASE}/courses/{cid}/pages/{slug}"
                 add(m)
     say("announcements")
     for a in canvas_get(f"courses/{cid}/discussion_topics", {"only_announcements": "true"}):
         for m in scan_html_for_media(a.get("message") or "", f"announcement: {a.get('title')}"):
             m.setdefault("title", a.get("title"))
             m.setdefault("created_at", a.get("posted_at"))
+            m["page_link"] = a.get("html_url")
             add(m)
+    say("drive folders")
+    expand_drive_folders(items)
     new = 0
     with db() as con:
         for it in items.values():
-            cur = con.execute("""INSERT OR IGNORE INTO canvas_items(key, course_id, kind, title, url, page_url, created_at)
-                                 VALUES (?,?,?,?,?,?,?)""",
+            cur = con.execute("""INSERT OR IGNORE INTO canvas_items(key, course_id, kind, title, url, page_url,
+                                 created_at, page_link) VALUES (?,?,?,?,?,?,?,?)""",
                               (it["key"], course["id"], it["kind"], it.get("title"), it["url"], it.get("page_url"),
-                               it.get("created_at")))
+                               it.get("created_at"), it.get("page_link")))
             new += cur.rowcount
     log.info("canvas scan %s: %s items (%s new)", course["code"], len(items), new)
     return {"found": len(items), "new": new}
 
 
-def canvas_download_file(file_id: int, dest: Path) -> tuple[Path, dict]:
-    """Canvas Files need the token; yt-dlp doesn't know about them."""
-    import httpx
+def canvas_file_source(file_id: int) -> tuple[str, str, dict]:
+    """(download URL, file name, metadata) for a Canvas File. Needs the open session."""
     f = canvas_get(f"files/{file_id}", paginate=False)
     if not f:
         raise CanvasError(f"Canvas file {file_id} is not accessible")
-    dest.mkdir(parents=True, exist_ok=True)
-    out = dest / Path(f["display_name"]).name
-    with httpx.stream("GET", f["url"], follow_redirects=True, timeout=120) as r:  # pre-signed URL
-        r.raise_for_status()
-        with open(out, "wb") as fh:
-            for chunk in r.iter_bytes(1 << 20):
-                fh.write(chunk)
-    return out, {"title": Path(f["display_name"]).stem, "upload_date": f.get("created_at")}
+    return f["url"], Path(f["display_name"]).name, {"title": Path(f["display_name"]).stem,
+                                                    "upload_date": f.get("created_at")}
 
 
-def canvas_media_object(mid: str, dest: Path) -> tuple[Path, dict]:
+def canvas_media_source(mid: str) -> tuple[str, str, dict]:
     """Canvas-native media (Canvas Studio/media comments): the API lists direct source URLs."""
-    import httpx
     mo = canvas_get(f"media_objects/{mid}", paginate=False) or {}
     sources = sorted(mo.get("media_sources") or [], key=lambda s: int(s.get("bitrate") or 0))
     if not sources:
         raise CanvasError(f"Canvas media {mid}: no downloadable sources")
     src = sources[-1]
-    dest.mkdir(parents=True, exist_ok=True)
-    out = dest / f"{mid}.{src.get('fileExt') or 'mp4'}"
-    with httpx.stream("GET", src["url"], follow_redirects=True, timeout=120) as r:
+    return src["url"], f"{mid}.{src.get('fileExt') or 'mp4'}", {"title": mo.get("title") or mid,
+                                                              "upload_date": mo.get("created_at")}
+
+
+def stream_download(url: str, out: Path, jar=None) -> Path:
+    import httpx
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with httpx.stream("GET", url, follow_redirects=True, timeout=120, cookies=jar) as r:
         r.raise_for_status()
         with open(out, "wb") as fh:
             for chunk in r.iter_bytes(1 << 20):
                 fh.write(chunk)
-    return out, {"title": mo.get("title") or mid, "upload_date": mo.get("created_at")}
-
-
-COOKIE_BROWSER = os.environ.get("LECTURELAB_COOKIES_BROWSER", "chrome")
+    return out
 
 
 def canvas_source_url(it: dict) -> str:
     """A real link for the lecture's source, not the internal downloader handle."""
-    base = canvas_config()[0]
+    base = CANVAS_BASE
     course = find_course(it["course_id"]) or {}
     if it["kind"] == "file":
         return f"{base}/courses/{course.get('canvas_id')}/files/{it['url'].split(':', 1)[1]}"
@@ -1406,19 +1746,37 @@ def job_canvas_pull(job: dict) -> dict:
     with db() as con:
         it = dict(con.execute("SELECT * FROM canvas_items WHERE course_id=? AND key=?", (cid, key)).fetchone())
     tmp = DATA / "downloads" / f"job{job['id']}"
+    cookie_file = job_cookie_file(job["id"])
     try:
         job_update(job["id"], progress=f"downloading {it['title'] or key}")
-        if it["kind"] == "file":
-            files = [canvas_download_file(int(it["url"].split(":")[1]), tmp)]
-        elif it["kind"] == "media_object":
-            files = [canvas_media_object(it["url"].split(":")[1], tmp)]
-        elif it["url"].startswith("kaltura-unresolved:"):
+        if it["url"].startswith("kaltura-unresolved:"):
             raise CanvasError("This Kaltura embed doesn't say which Kaltura account it belongs to, so it can't be "
                               f"fetched automatically. Open it from {it['page_url']}, copy the video's share link "
                               "and add that under Add recording > Link.")
+        # Only Canvas-hosted items need the browser, and only to look things up and copy its
+        # cookies: it's closed again before the (possibly multi-GB) download, so Connect Canvas
+        # and scans aren't blocked meanwhile.
+        source = cookies = None
+        if it["kind"] in ("file", "media_object", "kaltura", "panopto", "mediasite"):
+            canvas_ready()
+            with CanvasSession() as cs:
+                ref = it["url"].split(":", 1)[1]
+                if it["kind"] == "file":
+                    source = (*canvas_file_source(int(ref)), cs.httpx_cookies())
+                elif it["kind"] == "media_object":
+                    source = (*canvas_media_source(ref), cs.httpx_cookies())
+                else:
+                    # Videos behind UF login: let the player sign in inside our profile, then hand
+                    # yt-dlp that profile's cookies (Chrome's own cookies can't be read on Windows).
+                    if it.get("page_link"):
+                        job_update(job["id"], progress="opening the Canvas page to sign in to the player")
+                        cs.warm(it["page_link"])
+                    cookies = cs.export_cookies(cookie_file)
+        if source:
+            url, name, meta, jar = source
+            files = [(stream_download(url, tmp / Path(name).name, jar), meta)]
         else:
-            needs_login = it["kind"] in ("kaltura", "panopto", "mediasite")
-            files = download_url(it["url"], tmp, cookies_browser=COOKIE_BROWSER if needs_login else None,
+            files = download_url(it["url"], tmp, cookiefile=cookies,
                                  progress=lambda m: job_update(job["id"], progress=m))
         results = []
         for f, meta in files:
@@ -1436,6 +1794,7 @@ def job_canvas_pull(job: dict) -> dict:
                         (str(e)[:2000], cid, key))
         raise
     finally:
+        cookie_file.unlink(missing_ok=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -1473,8 +1832,607 @@ def job_canvas_scan(job: dict) -> dict:
     return canvas_scan_course(course, progress=lambda m: job_update(job["id"], progress=f"scanning {m}"))
 
 
+def canvas_ready() -> None:
+    """Raise a clear error unless the LectureLab browser has a Canvas session."""
+    st = canvas_state().get("state")
+    if st == "not_connected":
+        raise CanvasError("Canvas isn't connected yet: click Connect Canvas and sign in with GatorLink.")
+    if st == "needs_signin":
+        raise CanvasNeedsSignIn("Canvas needs sign-in: click Connect Canvas. Inbox folders keep working meanwhile.")
+
+
 JOB_HANDLERS["canvas_pull"] = job_canvas_pull
 JOB_HANDLERS["canvas_scan"] = job_canvas_scan
+
+
+# ---------------------------------------------------------------- transcription
+
+WSL_DISTRO = os.environ.get("LECTURELAB_WSL_DISTRO", "Ubuntu")  # the default distro is docker-desktop
+COLAB_SCRIPT = ROOT / "colab" / "transcribe.py"
+COLAB_REMOTE = "/content/lecturelab"
+# Runs colab/transcribe.py as a child process on the VM. A native crash (e.g. CTranslate2 not
+# finding cuDNN) would otherwise kill the kernel silently; this way its stderr and exit code
+# come back in the exec output. The pip cuDNN/cuBLAS libraries go on LD_LIBRARY_PATH first.
+COLAB_LAUNCHER = f"""
+import glob, os, subprocess, sys
+env = dict(os.environ)
+libs = sorted({{d for site in sys.path for pat in ("nvidia/cudnn/lib", "nvidia/cublas/lib")
+               for d in glob.glob(os.path.join(site, pat))}})
+env["LD_LIBRARY_PATH"] = ":".join(libs + [env.get("LD_LIBRARY_PATH", "")])
+p = subprocess.Popen([sys.executable, "-u", "transcribe.py"], cwd={COLAB_REMOTE!r}, env=env,
+                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+for line in p.stdout:
+    print(line, end="", flush=True)
+print(f"[worker exit {{p.wait()}}]", flush=True)
+"""
+COLAB_GPUS = ["T4", "L4"]  # T4 is cheapest; L4 when no T4 is free
+MIN_UNITS = float(os.environ.get("LECTURELAB_MIN_UNITS", 20))
+SESSION_PREFIX = "lecturelab-"
+LOCAL_MODELS = ["large-v3-turbo", "distil-large-v3"]
+# Tests run with LECTURELAB_COLAB=off: a test server must never touch the real Colab account
+# (its orphan-session sweep would stop a real batch).
+COLAB_ENABLED = os.environ.get("LECTURELAB_COLAB", "on") != "off"
+
+
+class LowUnits(Exception):
+    pass
+
+
+def meta_get(key: str, default=None):
+    with db() as con:
+        r = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return json.loads(r["value"]) if r else default
+
+
+def meta_set(key: str, value) -> None:
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (key, json.dumps(value)))
+
+
+def initial_prompt(lecture: dict) -> str:
+    """Whisper's initial_prompt: course name, title, the course vocabulary and the matched slide
+    text, so jargon, names and function names are spelled right. Whisper only reads the last
+    ~224 tokens of a prompt, so it's capped at ~800 characters, vocabulary first."""
+    course = find_course(lecture["course_id"]) if lecture.get("course_id") else None
+    parts = [f"{course['code']} {course['name']} lecture: {lecture['title']}." if course
+             else f"Lecture: {lecture['title']}."]
+    vocab = [t for t in (course or {}).get("vocabulary", "").splitlines() if t.strip()]
+    if vocab:
+        parts.append("Terms: " + ", ".join(vocab) + ".")
+    slides = lecture_slide_terms(lecture["id"])
+    if slides:
+        parts.append("Slides: " + slides)
+    text = " ".join(parts)
+    return text[:800].rsplit(" ", 1)[0] if len(text) > 800 else text
+
+
+def lecture_slide_terms(lecture_id: int) -> str:
+    """Hook for Stage 3: key terms from the slides matched to this lecture."""
+    return ""
+
+
+def store_transcript(lecture_id: int, result: dict, source: str) -> int:
+    """Save a transcript (Colab or local JSON shape) and mark the lecture transcribed."""
+    path = DATA / "transcripts" / f"{lecture_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result), encoding="utf-8")
+    segs = result["segments"]
+    with db() as con:
+        con.execute("DELETE FROM segments WHERE lecture_id=?", (lecture_id,))
+        con.executemany("INSERT INTO segments(lecture_id, idx, start, end, text, words) VALUES (?,?,?,?,?,?)",
+                        [(lecture_id, i, s["start"], s["end"], s["text"], json.dumps(s.get("words") or []))
+                         for i, s in enumerate(segs)])
+        con.execute("UPDATE lectures SET status='transcribed', transcript_source=?, error=NULL, "
+                    "updated_at=datetime('now') WHERE id=?", (source, lecture_id))
+    log.info("lecture %s transcribed by %s: %s segments", lecture_id, source, len(segs))
+    return len(segs)
+
+
+def load_audio_array(path: Path):
+    """16 kHz float32 via ffmpeg (not PyAV: some PyAV releases break faster-whisper's decoder)."""
+    import numpy as np
+    raw = run([find_tool("ffmpeg"), "-nostdin", "-v", "error", "-i", path, "-f", "f32le", "-ac", "1",
+               "-ar", "16000", "-"]).stdout
+    return np.frombuffer(raw, np.float32)
+
+
+_local_models: dict = {}
+
+
+def transcribe_local(lecture: dict, progress=None, model_name: str | None = None) -> dict:
+    """CPU fallback: faster-whisper int8 with the model the benchmark picked."""
+    from faster_whisper import WhisperModel
+    name = model_name or os.environ.get("LECTURELAB_LOCAL_MODEL") or meta_get("local_model", "large-v3-turbo")
+    if name not in _local_models:
+        _local_models.clear()  # one model in RAM at a time; they're ~1.5 GB each
+        _local_models[name] = WhisperModel(name, device="cpu", compute_type="int8", cpu_threads=os.cpu_count())
+    model = _local_models[name]
+    audio = load_audio_array(DATA / lecture["audio_path"])
+    t = time.time()
+    segments, info = model.transcribe(audio, language="en", beam_size=5, vad_filter=True,
+                                      vad_parameters={"min_silence_duration_ms": 500}, word_timestamps=True,
+                                      initial_prompt=initial_prompt(lecture) or None)
+    segs, last = [], 0.0
+    for s in segments:
+        segs.append({"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip(),
+                     "words": [[round(w.start, 2), round(w.end, 2), w.word, round(w.probability, 3)]
+                               for w in (s.words or [])]})
+        if progress and time.time() - last > 3:
+            last = time.time()
+            progress(f"transcribing locally ({name}): {s.end / max(info.duration, 1):.0%}")
+    return {"lecture_id": lecture["id"], "model": name, "device": "cpu-int8", "language": info.language,
+            "duration": round(info.duration, 2), "elapsed_sec": round(time.time() - t, 1), "segments": segs}
+
+
+# --- Colab through the official CLI, inside WSL
+
+def wsl(*args, timeout: float = 600) -> subprocess.CompletedProcess:
+    return run(["wsl.exe", "-d", WSL_DISTRO, "-e", *args], timeout=timeout, text=True, encoding="utf-8",
+               errors="replace")
+
+
+_colab_bin: str | None = None
+
+
+def colab_bin() -> str:
+    global _colab_bin
+    if not _colab_bin:
+        out = wsl("sh", "-c", 'command -v colab || echo "$HOME/.local/bin/colab"', timeout=60).stdout.strip()
+        _colab_bin = out.splitlines()[-1]
+    return _colab_bin
+
+
+def colab(*args, timeout: float = 900) -> str:
+    """Run one colab CLI command in WSL. stdin is closed, so if the CLI was never logged in it
+    fails fast with its OAuth prompt in the error instead of hanging."""
+    return wsl(colab_bin(), *args, timeout=timeout).stdout
+
+
+UPLOAD_CHUNK_MB = int(os.environ.get("LECTURELAB_UPLOAD_CHUNK_MB", 8))
+
+
+def colab_exec_code(session: str, code: str, workdir: Path, name: str, timeout: float = 600) -> str:
+    """Run a small generated script on the VM (`colab exec -f`)."""
+    f = workdir / name
+    f.write_text(code, encoding="utf-8")
+    return colab_exec(session, wslpath(f), timeout)
+
+
+def colab_exec(session: str, remote_file: str, timeout: float) -> str:
+    """`colab exec` gives up after 30 s by default and still exits 0, so always pass --timeout
+    (a little under ours, so the CLI returns its own output before we kill it)."""
+    return colab("exec", "-s", session, "-f", remote_file, "--timeout", str(int(max(timeout - 60, 30))),
+                 timeout=timeout)
+
+
+def colab_upload(session: str, local: Path, remote: str, workdir: Path) -> None:
+    """Upload through the CLI. Its contents API rejects big files (an 86 MB FLAC fails with an SSL
+    EOF), so anything over UPLOAD_CHUNK_MB goes up in parts and is joined and checksummed on the VM."""
+    size, chunk = local.stat().st_size, UPLOAD_CHUNK_MB << 20
+    if size <= chunk:
+        colab("upload", "-s", session, wslpath(local), remote, timeout=900)
+        return
+    parts_dir = workdir / "parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    digest, parts = hashlib.sha256(), []
+    try:
+        with open(local, "rb") as fh:
+            while block := fh.read(chunk):
+                digest.update(block)
+                part = parts_dir / f"{local.parent.name}-{len(parts):03d}.part"
+                parts.append(part)
+                part.write_bytes(block)
+        for i, part in enumerate(parts):
+            for attempt in (1, 2):  # one retry: the contents API sometimes drops a connection (SSL EOF)
+                try:
+                    colab("upload", "-s", session, wslpath(part), f"{remote}.{i:03d}.part", timeout=900)
+                    break
+                except RuntimeError as e:
+                    if attempt == 2:
+                        raise
+                    log.warning("upload of part %s of %s failed, retrying: %s", i, local.name, str(e)[-200:])
+    finally:
+        for part in parts:
+            part.unlink(missing_ok=True)
+    out = colab_exec_code(session, f"""
+import hashlib, os
+remote, n, want = {remote!r}, {len(parts)}, {digest.hexdigest()!r}
+h = hashlib.sha256()
+with open(remote, "wb") as out:
+    for i in range(n):
+        p = f"{{remote}}.{{i:03d}}.part"
+        with open(p, "rb") as f:
+            b = f.read()
+        h.update(b); out.write(b); os.remove(p)
+print("JOINED_OK" if h.hexdigest() == want else "JOINED_BAD " + h.hexdigest())
+""", workdir, f"join-{local.parent.name}.py")
+    if "JOINED_OK" not in out:
+        raise RuntimeError(f"upload of {local.name} was corrupted on the way to Colab: {out.strip()[-300:]}")
+
+
+def wslpath(p: Path) -> str:
+    return wsl("wslpath", "-a", str(Path(p).resolve()), timeout=60).stdout.strip()
+
+
+def parse_colab_units(out: str) -> float | None:
+    """`colab usage` prints "Current balance: 0.00 compute units". Anything else is None (unknown),
+    never a guess: a wrong number here could spend paid units."""
+    m = re.search(r"(?im)^\s*current balance:\s*([\d,]+(?:\.\d+)?)\s*compute units\s*$", out)
+    return float(m[1].replace(",", "")) if m else None
+
+
+def parse_colab_rate(out: str) -> float | None:
+    m = re.search(r"(?im)^\s*usage rate:\s*([\d.]+)\s*/\s*hr\s*$", out)
+    return float(m[1]) if m else None
+
+
+def colab_units() -> float | None:
+    """Remaining compute units from `colab usage`, or None if the output can't be read."""
+    out = colab("usage", timeout=120)
+    meta_set("colab_usage_raw", out[-2000:])
+    return parse_colab_units(out)
+
+
+def colab_rate() -> float | None:
+    """Units per hour the running session is billed at ("Usage rate: 1.07/hr")."""
+    return parse_colab_rate(colab("usage", timeout=120))
+
+
+def colab_sessions() -> list[str]:
+    out = colab("sessions", timeout=120)
+    return sorted(set(re.findall(rf"\b({re.escape(SESSION_PREFIX)}\d+)\b", out)))
+
+
+def stop_orphan_sessions(keep: str | None = None) -> list[str]:
+    """An idle runtime keeps burning compute units. If a batch process died before its finally
+    ran, its session is still up: stop every LectureLab session that isn't the current one."""
+    stopped = []
+    try:
+        for s in colab_sessions():
+            if s != keep:
+                try:
+                    colab("stop", "-s", s, timeout=180)
+                    stopped.append(s)
+                except Exception as e:
+                    log.warning("could not stop orphan Colab session %s: %s", s, e)
+    except Exception as e:
+        log.warning("could not list Colab sessions: %s", e)
+    if stopped:
+        log.warning("stopped orphaned Colab session(s): %s", stopped)
+    return stopped
+
+
+def sweep_orphans_if_idle() -> list[str]:
+    """Stop leftover sessions only when no batch is running anywhere (we can take the transcribe
+    lock). Otherwise a server restart would kill the session another process is using."""
+    lk = FileLock(DATA / "transcribe.lock")
+    if not lk.acquire():
+        return []
+    try:
+        return stop_orphan_sessions()
+    finally:
+        lk.release()
+
+
+def colab_new_session(name: str) -> str:
+    errors = []
+    for gpu in COLAB_GPUS:
+        try:
+            colab("new", "-s", name, "--gpu", gpu, timeout=900)
+            return gpu
+        except Exception as e:
+            errors.append(f"{gpu}: {e}")
+            log.warning("colab new --gpu %s failed: %s", gpu, e)
+    raise RuntimeError("no Colab GPU available: " + " | ".join(errors))
+
+
+def transcribe_batch_colab(lectures: list[dict], batch_id: int, progress=None, force: bool = False) -> list[int]:
+    """One Colab session for the whole batch: new -> upload -> exec -> download -> stop (always).
+    Each finished transcript is stored as soon as it's downloaded, so an interrupted batch keeps
+    its finished lectures and the rest stay queued. force: you asked for Colab explicitly, so an
+    unreadable balance doesn't stop it (a known low balance still does)."""
+    say = progress or (lambda m: None)
+    session = f"{SESSION_PREFIX}{batch_id}"
+    stop_orphan_sessions()
+    units_before = colab_units()
+    # 0 units means the free tier: there's nothing to burn, so a free T4 is fine. A small paid
+    # balance is protected instead: below MIN_UNITS the batch goes to the local CPU.
+    if units_before is None and not force:
+        raise LowUnits("couldn't read the Colab compute-unit balance from `colab usage`; not risking paid units")
+    if units_before is not None and 0 < units_before < MIN_UNITS:
+        raise LowUnits(f"only {units_before:g} Colab compute units left (minimum {MIN_UNITS:g})")
+    with db() as con:
+        con.execute("UPDATE transcribe_batches SET units_before=? WHERE id=?", (units_before, batch_id))
+    manifest = {"model": "large-v3", "items": [
+        {"lecture_id": l["id"], "audio": f"{l['id']}.flac", "initial_prompt": initial_prompt(l)} for l in lectures]}
+    mpath = DATA / "colab_batches" / str(batch_id) / "manifest.json"
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    mpath.write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    done: list[int] = []
+    gpu = None
+
+    def fetch_results(budget: float = 900):
+        # A transcript is a few MB at most. The budget bounds how long a hung WSL/CLI can keep
+        # the (billed) session alive before the stop in the finally below.
+        end = time.time() + budget
+        for l in lectures:
+            if l["id"] in done:
+                continue
+            left = end - time.time()
+            if left < 10:
+                log.warning("batch %s: out of time downloading results; the rest stay queued", batch_id)
+                return
+            local = mpath.parent / f"{l['id']}.json"
+            try:
+                colab("download", "-s", session, f"{COLAB_REMOTE}/out/{l['id']}.json", wslpath(local),
+                      timeout=min(180, left))
+            except Exception:
+                continue  # not finished; it stays queued
+            if local.exists():
+                try:
+                    store_transcript(l["id"], json.loads(local.read_text(encoding="utf-8")), f"colab-large-v3 ({gpu})")
+                except Exception as e:  # one bad file mustn't cost the others (or mask the real error)
+                    log.error("batch %s: couldn't store the transcript of lecture %s: %s", batch_id, l["id"], e)
+                    continue
+                done.append(l["id"])
+                with db() as con:
+                    con.execute("UPDATE transcribe_batches SET done_ids=? WHERE id=?", (json.dumps(done), batch_id))
+
+    try:
+        say("starting a Colab GPU")
+        gpu = colab_new_session(session)
+        with db() as con:
+            con.execute("UPDATE transcribe_batches SET gpu=? WHERE id=?", (gpu, batch_id))
+        try:
+            rate = colab_rate()
+            log.info("Colab %s session %s: billed at %s units/hr", gpu, session, rate)
+            with db() as con:
+                con.execute("UPDATE transcribe_batches SET units_per_hour=? WHERE id=?", (rate, batch_id))
+        except Exception as e:
+            log.warning("could not read the Colab usage rate: %s", e)
+        say(f"uploading to Colab ({gpu})")
+        # The contents API won't create folders (a 500 if the parent is missing), so make them first.
+        colab_exec_code(session, f"import os; os.makedirs({COLAB_REMOTE + '/out'!r}, exist_ok=True)",
+                        mpath.parent, "prep.py")
+        colab("upload", "-s", session, wslpath(mpath), f"{COLAB_REMOTE}/manifest.json", timeout=600)
+        colab("upload", "-s", session, wslpath(COLAB_SCRIPT), f"{COLAB_REMOTE}/transcribe.py", timeout=600)
+        t_up = time.time()
+        for i, l in enumerate(lectures, 1):
+            say(f"uploading audio {i}/{len(lectures)} to Colab ({gpu})")
+            colab_upload(session, DATA / l["audio_path"], f"{COLAB_REMOTE}/{l['id']}.flac", mpath.parent)
+        log.info("batch %s: uploaded %s file(s) in %.0fs", batch_id, len(lectures), time.time() - t_up)
+        say(f"transcribing {len(lectures)} lecture(s) on Colab {gpu}")
+        out = colab_exec_code(session, COLAB_LAUNCHER, mpath.parent, "run.py", timeout=4 * 3600)
+        (mpath.parent / "exec.log").write_text(out, encoding="utf-8")
+        log.info("colab exec output (batch %s):\n%s", batch_id, out[-3000:])
+        say("downloading transcripts")
+        fetch_results()
+        if len(done) < len(lectures):
+            # exec can end early without an error (timeout, kernel crash): that's a failed batch.
+            tail = out.strip().splitlines()[-3:] or ["(no output)"]
+            raise RuntimeError(f"Colab returned {len(done)} of {len(lectures)} transcript(s); "
+                               f"last output: {' | '.join(tail)}")
+    finally:
+        try:
+            if gpu:  # a session exists: keep whatever finished before a failure
+                fetch_results(budget=300)
+        finally:
+            for attempt in (1, 2):
+                try:
+                    colab("stop", "-s", session, timeout=300)
+                    break
+                except Exception as e:
+                    log.error("colab stop -s %s failed (attempt %s): %s%s", session, attempt, e,
+                              " (will retry before the next batch)" if attempt == 2 else "")
+    return done
+
+
+def finish_batch(batch_id: int, t0: float, ok: bool, error: str | None = None, units_after: float | None = None):
+    with db() as con:
+        con.execute("UPDATE transcribe_batches SET ok=?, error=?, units_after=?, wall_sec=?, ended_at=datetime('now') "
+                    "WHERE id=?", (int(ok), error, units_after, round(time.time() - t0, 1), batch_id))
+        b = dict(con.execute("SELECT * FROM transcribe_batches WHERE id=?", (batch_id,)).fetchone())
+    used = (b["units_before"] - units_after) if (b["units_before"] is not None and units_after is not None) else None
+    per75 = used / (b["audio_sec"] / 4500) if used is not None and b["audio_sec"] else None
+    log.info("transcribe batch %s (%s %s): ok=%s, %s lecture(s), %.1f min audio, %.1f min wall, units %s -> %s "
+             "(used %s, %s per 75-min lecture)%s", batch_id, b["mode"], b["gpu"], ok, len(json.loads(b["done_ids"])),
+             (b["audio_sec"] or 0) / 60, (time.time() - t0) / 60, b["units_before"], units_after,
+             f"{used:.2f}" if used is not None else "?", f"{per75:.2f}" if per75 is not None else "?",
+             f" error: {error}" if error else "")
+
+
+def job_transcribe(job: dict) -> dict:
+    """payload: {lecture_ids?: [...], mode: auto|colab|local}. With no ids, takes every queued lecture.
+    auto = Colab, unless units are low or Colab failed twice in a row; then local CPU."""
+    mode = job["payload"].get("mode", "auto")
+    say = lambda m: job_update(job["id"], progress=m)  # noqa: E731
+    lock = FileLock(DATA / "transcribe.lock")
+    if not lock.acquire():
+        job_update(job["id"], status="queued", retry_at=_sqlnow(120), owner_pid=None)
+        raise RetryLater("another transcription batch is running")
+    try:
+        with db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            ids = job["payload"].get("lecture_ids")
+            if ids is not None:
+                # Lectures you picked: a failed one ('error') may be retried on purpose.
+                lectures = rows(con.execute(
+                    "SELECT * FROM lectures WHERE status IN ('queued_transcribe','error') AND audio_path IS NOT NULL "
+                    f"AND id IN ({','.join('?' * len(ids)) or 'NULL'}) ORDER BY id", ids))
+            else:
+                # "Everything waiting": only the queue, never lectures that already failed.
+                lectures = rows(con.execute("SELECT * FROM lectures WHERE status='queued_transcribe' "
+                                            "AND audio_path IS NOT NULL ORDER BY id"))
+            missing = [l for l in lectures if not (DATA / l["audio_path"]).exists()]
+            for l in missing:  # a local problem: don't send it anywhere, and don't blame Colab for it
+                con.execute("UPDATE lectures SET status='error', error=? WHERE id=?",
+                            (f"audio file missing: {l['audio_path']}", l["id"]))
+            lectures = [l for l in lectures if l not in missing]
+            if not lectures:
+                return {"transcribed": [], "note": "nothing waiting"}
+            for l in lectures:
+                con.execute("UPDATE lectures SET status='transcribing', error=NULL WHERE id=?", (l["id"],))
+            audio_sec = sum(l["duration_sec"] or 0 for l in lectures)
+        use_local = mode == "local"
+        reason = "requested" if use_local else None
+        if mode == "auto" and not COLAB_ENABLED:
+            use_local, reason = True, "Colab disabled (LECTURELAB_COLAB=off)"
+        if mode == "auto" and colab_backed_off():
+            use_local, reason = True, f"Colab failed twice in a row; trying it again after {COLAB_BACKOFF_H:g} h"
+        done, t0 = [], time.time()
+        batch_id = None
+        try:
+            if not use_local:
+                with db() as con:
+                    batch_id = con.execute("INSERT INTO transcribe_batches(mode, lecture_ids, audio_sec) VALUES "
+                                           "('colab',?,?)", (json.dumps([l["id"] for l in lectures]), audio_sec)).lastrowid
+                try:
+                    done = transcribe_batch_colab(lectures, batch_id, progress=say, force=mode == "colab")
+                    meta_set("colab_failures", 0)
+                    finish_batch(batch_id, t0, ok=True, units_after=_safe_units())
+                except LowUnits as e:
+                    finish_batch(batch_id, t0, ok=False, error=str(e))
+                    if mode == "colab":
+                        raise
+                    use_local, reason = True, str(e)
+                except Exception as e:
+                    meta_set("colab_failures", meta_get("colab_failures", 0) + 1)
+                    meta_set("colab_failed_at", time.time())
+                    finish_batch(batch_id, t0, ok=False, error=str(e)[:2000], units_after=_safe_units())
+                    raise
+            if use_local:
+                todo = [l for l in lectures if l["id"] not in done]
+                model = os.environ.get("LECTURELAB_LOCAL_MODEL") or meta_get("local_model", "large-v3-turbo")
+                with db() as con:
+                    batch_id = con.execute("INSERT INTO transcribe_batches(mode, gpu, lecture_ids, audio_sec) VALUES "
+                                           "('local',?,?,?)", (model, json.dumps([l["id"] for l in todo]),
+                                                               sum(l["duration_sec"] or 0 for l in todo))).lastrowid
+                log.info("transcribing %s lecture(s) locally (%s): %s", len(todo), model, reason)
+                t0 = time.time()
+                try:
+                    for l in todo:
+                        res = transcribe_local(l, progress=say)
+                        store_transcript(l["id"], res, f"local-{res['model']}")
+                        done.append(l["id"])
+                except Exception as e:
+                    finish_batch(batch_id, t0, ok=False, error=str(e)[:2000])  # never leave it looking busy
+                    raise
+                finish_batch(batch_id, t0, ok=True)
+            return {"transcribed": done, "mode": "local" if use_local else "colab", "reason": reason}
+        finally:
+            # Anything not finished goes back to the queue for the next run; nothing is redone.
+            with db() as con:
+                for l in lectures:
+                    if l["id"] not in done:
+                        con.execute("UPDATE lectures SET status='queued_transcribe' WHERE id=? AND status='transcribing'",
+                                    (l["id"],))
+    finally:
+        lock.release()
+
+
+COLAB_BACKOFF_H = float(os.environ.get("LECTURELAB_COLAB_BACKOFF_H", "6"))
+
+
+def colab_backed_off() -> bool:
+    """After 2 Colab failures in a row, auto mode uses the CPU for a while, then tries Colab again
+    (a success resets the count). Without the time limit it would never try Colab again."""
+    if meta_get("colab_failures", 0) < 2:
+        return False
+    return time.time() - meta_get("colab_failed_at", 0) < COLAB_BACKOFF_H * 3600
+
+
+def _safe_units():
+    try:
+        return colab_units()
+    except Exception as e:
+        log.warning("colab usage failed: %s", e)
+        return None
+
+
+def _sqlnow(plus_sec: int = 0) -> str:
+    return datetime.fromtimestamp(time.time() + plus_sec, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+class RetryLater(Exception):
+    """Raised by a job that re-queued itself (it set its own status and retry_at)."""
+
+
+def reset_stuck_transcribing() -> int:
+    """Lectures left 'transcribing' by a process that died go back to the queue, and that
+    process's batch row is closed (an open row makes the UI think a batch is still running)."""
+    lk = FileLock(DATA / "transcribe.lock")
+    if not lk.acquire():
+        return 0  # a batch is genuinely running
+    try:
+        with db() as con:
+            n = con.execute("UPDATE lectures SET status='queued_transcribe' WHERE status='transcribing'").rowcount
+            con.execute("UPDATE transcribe_batches SET ok=0, error='interrupted (the process stopped mid-batch)', "
+                        "ended_at=datetime('now') WHERE ended_at IS NULL")
+    finally:
+        lk.release()
+    if n:
+        log.warning("requeued %s lecture(s) left mid-transcription", n)
+    return n
+
+
+JOB_HANDLERS["transcribe"] = job_transcribe
+
+
+def normalize_words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower().replace("-", " "))
+
+
+def wer(reference: str, hypothesis: str) -> float:
+    """Word error rate: word-level edit distance / reference length."""
+    r, h = normalize_words(reference), normalize_words(hypothesis)
+    if not r:
+        return 0.0 if not h else 1.0
+    prev = list(range(len(h) + 1))
+    for i, rw in enumerate(r, 1):
+        cur = [i] + [0] * len(h)
+        for j, hw in enumerate(h, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (rw != hw))
+        prev = cur
+    return prev[-1] / len(r)
+
+
+def benchmark_local(lecture_id: int, start: float = 120, length: float = 120) -> dict:
+    """Pick the CPU fallback model: transcribe the same 2-minute slice with each candidate and
+    score it against that lecture's Colab large-v3 transcript (the best transcript we have).
+    The most accurate model wins unless it's more than 2x slower than the fastest."""
+    lec = get_lecture(lecture_id)
+    if not (lec.get("transcript_source") or "").startswith("colab"):
+        raise ValueError(f"lecture {lecture_id} needs a Colab large-v3 transcript to score against")
+    with db() as con:
+        segs = rows(con.execute("SELECT start, end, text, words FROM segments WHERE lecture_id=? ORDER BY idx",
+                                (lecture_id,)))
+    ref_words = [w for s in segs for w in json.loads(s["words"] or "[]") if start <= w[0] < start + length]
+    reference = " ".join(w[2] for w in ref_words)
+    raw = run([find_tool("ffmpeg"), "-nostdin", "-v", "error", "-ss", start, "-t", length, "-i", DATA / lec["audio_path"],
+               "-f", "f32le", "-ac", "1", "-ar", "16000", "-"]).stdout
+    import numpy as np
+    from faster_whisper import WhisperModel
+    audio = np.frombuffer(raw, np.float32)
+    results = {}
+    for name in LOCAL_MODELS:
+        model = WhisperModel(name, device="cpu", compute_type="int8", cpu_threads=os.cpu_count())
+        t = time.time()
+        sgs, _ = model.transcribe(audio, language="en", beam_size=5, vad_filter=True,
+                                  initial_prompt=initial_prompt(lec) or None)
+        text = " ".join(x.text.strip() for x in sgs)
+        took = time.time() - t
+        results[name] = {"seconds": round(took, 1), "rtf": round(took / length, 3), "wer": round(wer(reference, text), 4),
+                         "minutes_per_75min": round(took / length * 75, 1)}
+        log.info("benchmark %s: %s", name, results[name])
+        del model
+    fastest = min(r["seconds"] for r in results.values())
+    eligible = {n: r for n, r in results.items() if r["seconds"] <= 2 * fastest}
+    pick = min(eligible, key=lambda n: (eligible[n]["wer"], eligible[n]["seconds"]))
+    report = {"lecture_id": lecture_id, "slice": [start, start + length], "reference_words": len(ref_words),
+              "results": results, "picked": pick, "cpu": os.cpu_count(), "at": datetime.now().isoformat(timespec="seconds")}
+    meta_set("benchmark", report)
+    meta_set("local_model", pick)
+    return report
 
 
 # ---------------------------------------------------------------- v1 import
@@ -1558,6 +2516,11 @@ class AutoPull(BaseModel):
     auto_pull: bool
 
 
+class TranscribeIn(BaseModel):
+    lecture_ids: list[int] | None = None
+    mode: str = "auto"  # auto | colab | local
+
+
 def check_ingest_fields(course_id: int | None, date: str | None) -> None:
     """Reject bad fields up front, not after a 20-minute download."""
     if course_id is not None and not find_course(course_id):
@@ -1577,6 +2540,12 @@ def wake_workers() -> None:
 
 def start_background(watch_inboxes: bool = True) -> None:
     requeue_orphaned_jobs()
+    reset_stuck_transcribing()
+    if COLAB_ENABLED:  # off the startup path: WSL can take a few seconds to wake
+        threading.Thread(target=sweep_orphans_if_idle, daemon=True, name="colab-sweep").start()
+    if "transcribe" not in WORKERS:
+        WORKERS["transcribe"] = Worker(["transcribe"], "transcribe-worker")
+        WORKERS["transcribe"].start()
     if "ingest" not in WORKERS:
         WORKERS["ingest"] = Worker(["ingest"], "ingest-worker")
         WORKERS["ingest"].start()
@@ -1680,8 +2649,12 @@ def create_app():
             out = rows(con.execute(q))
         for j in out:
             p = json.loads(j.pop("payload") or "{}")
-            j["label"] = (p.get("url") or p.get("key") or Path(p.get("path", "")).name.split("-", 1)[-1]
-                          or (find_course(p["course_id"]) or {}).get("code", ""))
+            if j["kind"] == "transcribe":
+                ids = p.get("lecture_ids")
+                j["label"] = f"{'lecture ' + ', '.join(map(str, ids)) if ids else 'everything waiting'} ({p.get('mode', 'auto')})"
+            else:
+                j["label"] = (p.get("url") or p.get("key") or p.get("title") or Path(p.get("path", "")).name
+                              or (find_course(p.get("course_id")) or {}).get("code", ""))
         return out
 
     @app.get("/api/lectures")
@@ -1723,7 +2696,29 @@ def create_app():
             raise HTTPException(404, "no such media")
         return FileResponse(DATA / rel)  # supports Range requests, so the player can seek
 
-    # --- Canvas
+    # --- Canvas (through LectureLab's own browser profile; you sign in there yourself)
+    @app.get("/api/canvas/status")
+    def api_canvas_status():
+        st = canvas_state()
+        lk = FileLock(DATA / "browser.lock")
+        busy = not lk.acquire()
+        if not busy:
+            lk.release()
+        return {**st, "browser_busy": busy, "base": CANVAS_BASE}
+
+    @app.post("/api/canvas/connect")
+    def api_canvas_connect():
+        lk = FileLock(DATA / "browser.lock")
+        if not lk.acquire():
+            raise HTTPException(409, "The LectureLab browser is already open; finish signing in there.")
+        lk.release()
+        # Its own process: the sign-in window must be a normal visible window, and Playwright's
+        # browser shouldn't live inside the server process.
+        subprocess.Popen([sys.executable, str(ROOT / "cli.py"), "canvas-login"], cwd=ROOT,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log.info("opened the LectureLab browser for Canvas sign-in")
+        return {"opened": True}
+
     @app.get("/api/canvas/courses")
     def api_canvas_courses():
         try:
@@ -1736,7 +2731,7 @@ def create_app():
         if not find_course(course_id):
             raise HTTPException(404, "course not found")
         try:
-            canvas_config()
+            canvas_ready()
         except CanvasError as e:
             raise HTTPException(400, str(e))
         jid = enqueue("canvas_scan", {"course_id": course_id})
@@ -1769,6 +2764,37 @@ def create_app():
         with db() as con:
             con.execute("UPDATE courses SET auto_pull=? WHERE id=?", (int(body.auto_pull), course_id))
         return find_course(course_id)
+
+    # --- transcription
+    @app.post("/api/transcribe")
+    def api_transcribe(body: TranscribeIn):
+        if body.mode not in ("auto", "colab", "local"):
+            raise HTTPException(400, "mode must be auto, colab or local")
+        with db() as con:
+            busy = con.execute("SELECT id FROM jobs WHERE kind='transcribe' AND status IN ('queued','running')").fetchone()
+        if busy and not body.lecture_ids:
+            return {"job_id": busy["id"], "note": "a batch is already queued"}
+        jid = enqueue("transcribe", {"lecture_ids": body.lecture_ids, "mode": body.mode})
+        wake_workers()
+        return {"job_id": jid}
+
+    @app.get("/api/transcribe/status")
+    def api_transcribe_status():
+        with db() as con:
+            batches = rows(con.execute("SELECT * FROM transcribe_batches ORDER BY id DESC LIMIT 10"))
+            queued = con.execute("SELECT COUNT(*) FROM lectures WHERE status='queued_transcribe'").fetchone()[0]
+        return {"colab_enabled": COLAB_ENABLED, "colab_failures": meta_get("colab_failures", 0),
+                "local_model": os.environ.get("LECTURELAB_LOCAL_MODEL") or meta_get("local_model", "large-v3-turbo"),
+                "benchmark": meta_get("benchmark"), "min_units": MIN_UNITS, "queued": queued, "batches": batches}
+
+    @app.get("/api/lectures/{lecture_id}/segments")
+    def api_segments(lecture_id: int):
+        with db() as con:
+            segs = rows(con.execute("SELECT idx, start, end, text, words, slide_no FROM segments "
+                                    "WHERE lecture_id=? ORDER BY idx", (lecture_id,)))
+        for sg in segs:
+            sg["words"] = json.loads(sg["words"]) if sg["words"] else []
+        return segs
 
     @app.get("/api/inboxes")
     def api_inboxes():

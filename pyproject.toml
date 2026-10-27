@@ -21,10 +21,13 @@ dependencies = [
     "markdown-it-py==4.2.0",
     "mdit-py-plugins==0.6.1",
     "Pygments==2.21.0",
+    # Canvas is read through LectureLab's own browser profile. After installing, run once:
+    #   .venv\Scripts\python -m playwright install chromium
+    "playwright==1.64.1",
 ]
 
 [project.optional-dependencies]
-test = ["pytest==9.1.1", "playwright==1.64.1"]
+test = ["pytest==9.1.1"]
 
 [project.scripts]
 lecturelab = "cli:main"

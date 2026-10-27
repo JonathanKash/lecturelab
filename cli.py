@@ -141,6 +141,73 @@ def cmd_import_v1(args) -> int:
     return 0
 
 
+def cmd_transcribe(args) -> int:
+    """Transcribe queued lectures now: one Colab batch (or local CPU with --local)."""
+    ll.setup_logging(console=True)
+    mode = "local" if args.local else "colab" if args.colab else "auto"
+    job = ll.run_job_now(ll.enqueue("transcribe", {"lecture_ids": args.ids or None, "mode": mode}))
+    if job["status"] != "done":
+        print(f"FAILED: {job['error']}")
+        return 1
+    print(job["result"])
+    return 0
+
+
+def cmd_colab_status(args) -> int:
+    """Check the Colab CLI in WSL: login, compute units, running sessions."""
+    ll.setup_logging(console=False)
+    try:
+        print("colab:", ll.colab_bin())
+        print(ll.colab("usage", timeout=120).strip())
+        print("units parsed:", ll.colab_units())
+        print("LectureLab sessions running:", ll.colab_sessions() or "none")
+    except Exception as e:
+        print(f"FAILED: {e}")
+        return 1
+    return 0
+
+
+def cmd_benchmark(args) -> int:
+    ll.setup_logging(console=True)
+    report = ll.benchmark_local(args.lecture, start=args.start)
+    for name, r in report["results"].items():
+        print(f"{name:16} WER {r['wer']:.1%}  {r['seconds']:.0f}s for 2 min  (~{r['minutes_per_75min']:.0f} min per 75-min lecture)")
+    print("picked:", report["picked"])
+    return 0
+
+
+def cmd_canvas_login(args) -> int:
+    """Open the LectureLab browser at Canvas; you sign in with GatorLink + Duo yourself."""
+    ll.setup_logging(console=sys.stdout is not None)
+    try:
+        me = ll.canvas_login()
+        print(f"Canvas connected as {me.get('name')}")
+        return 0
+    except Exception as e:
+        print(f"FAILED: {e}")
+        return 1
+
+
+def cmd_canvas_status(args) -> int:
+    """Check the Canvas session (one GET /api/v1/users/self). Never signs in on its own."""
+    ll.setup_logging(console=False)
+    try:
+        # Never connected: a signed-out answer is expected, so don't call it an expired session.
+        quiet = ll.canvas_state().get("state") == "not_connected"
+        with ll.CanvasSession() as cs:
+            me = cs.whoami(quiet_auth=quiet)
+        print(f"Canvas: connected as {me.get('name')}")
+        for c in ll.canvas_courses():
+            print(f"  {c['code']:<28} -> {c['course_code'] or '(no LectureLab course)'}   {c['name']}")
+        return 0
+    except ll.CanvasNeedsSignIn:
+        print("Canvas: NEEDS SIGN-IN (run `lecturelab canvas-login` or click Connect Canvas). Inboxes still work.")
+        return 3
+    except Exception as e:
+        print(f"Canvas: FAILED: {e}")
+        return 1
+
+
 TASK_SERVER = "LectureLab Server"
 
 
@@ -196,6 +263,21 @@ def main(argv=None) -> int:
     i = sub.add_parser("import-v1", help="one-time import of v1 recordings and transcripts")
     i.add_argument("db", nargs="?", default=str(Path.home() / "Documents/Projects/lecturelab/lecturelab.db"))
     i.set_defaults(fn=cmd_import_v1)
+    tr = sub.add_parser("transcribe", help="transcribe queued lectures now (one Colab batch)")
+    tr.add_argument("ids", nargs="*", type=int, help="lecture ids (default: everything queued)")
+    g = tr.add_mutually_exclusive_group()
+    g.add_argument("--local", action="store_true", help="use the local CPU model instead of Colab")
+    g.add_argument("--colab", action="store_true", help="Colab only; fail instead of falling back")
+    tr.set_defaults(fn=cmd_transcribe)
+    sub.add_parser("colab-status", help="check Colab login, compute units and sessions").set_defaults(fn=cmd_colab_status)
+    b = sub.add_parser("benchmark", help="pick the local CPU model by speed and accuracy")
+    b.add_argument("lecture", type=int, help="a lecture with a Colab transcript to score against")
+    b.add_argument("--start", type=float, default=120, help="where the 2-minute slice starts (s)")
+    b.set_defaults(fn=cmd_benchmark)
+    sub.add_parser("canvas-login", help="open the LectureLab browser to sign in to Canvas").set_defaults(
+        fn=cmd_canvas_login)
+    sub.add_parser("canvas-status", help="check the Canvas session and list your courses").set_defaults(
+        fn=cmd_canvas_status)
     t = sub.add_parser("install-tasks", help="register the Windows logon task")
     t.add_argument("--start", action="store_true", help="also start it now")
     t.set_defaults(fn=cmd_install_tasks)
