@@ -187,11 +187,13 @@ def find_tool(name: str) -> str:
     raise FileNotFoundError(f"{name} not found; install it (see README)")
 
 
-def run(cmd: list, timeout: float = 2 * 3600, **kw) -> subprocess.CompletedProcess:
+def run(cmd: list, timeout: float = 2 * 3600, low: bool = False, **kw) -> subprocess.CompletedProcess:
     """subprocess.run with no console window, no stdin, captured output and a deadline (so one
-    corrupt file can't hang the worker forever); raises with stderr on failure."""
+    corrupt file can't hang the worker forever); raises with stderr on failure. low=True runs it
+    at below-normal priority, for background work that shouldn't slow the laptop down."""
     kw.setdefault("capture_output", True)
-    r = subprocess.run([str(c) for c in cmd], creationflags=NO_WINDOW, stdin=subprocess.DEVNULL,
+    flags = NO_WINDOW | (getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0) if low else 0)
+    r = subprocess.run([str(c) for c in cmd], creationflags=flags, stdin=subprocess.DEVNULL,
                        timeout=timeout, **kw)
     if r.returncode != 0:
         dec = lambda b: b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")  # noqa: E731
@@ -344,6 +346,42 @@ MIGRATIONS = [
     -- the Canvas page an embed was found on; opened in the LectureLab browser before a
     -- Kaltura/Panopto download so the player's own login cookies get set
     ALTER TABLE canvas_items ADD COLUMN page_link TEXT;
+    """,
+    """
+    -- Stage 3: slide decks, their pages, and which deck each lecture uses
+    CREATE TABLE decks (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reuse: slide-images/<id>/ may linger
+        course_id    INTEGER REFERENCES courses(id) ON DELETE CASCADE,
+        key          TEXT NOT NULL,           -- canvas-file:<id> | drive:<id> | upload:<sha256> | ocr:<lecture id>
+        source       TEXT NOT NULL,           -- canvas | drive | upload | ocr
+        title        TEXT NOT NULL,
+        url          TEXT,                    -- download handle: canvas-file:<id> or a Drive link
+        found_at     TEXT,                    -- where on Canvas it was listed
+        created_at   TEXT,                    -- the file's own date, used for matching
+        path         TEXT,                    -- relative to DATA: Slides/<Course>/<file>
+        pages        INTEGER,
+        thumb_w      INTEGER,                 -- every page of a deck renders at this size (NULL: text only)
+        thumb_h      INTEGER,
+        extracted_at REAL,                    -- unix time; versions the image URLs
+        status       TEXT NOT NULL DEFAULT 'new',  -- new (not downloaded) | ready | error
+        error        TEXT,
+        added_at     TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(course_id, key)
+    );
+    CREATE TABLE slides (
+        deck_id  INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+        no       INTEGER NOT NULL,            -- 1-based page number (= segments.slide_no)
+        title    TEXT,
+        text     TEXT NOT NULL DEFAULT '',
+        times    TEXT,                        -- video-frame decks: JSON [[start, end], ...] on screen
+        PRIMARY KEY (deck_id, no)
+    );
+    ALTER TABLE lectures ADD COLUMN deck_id INTEGER REFERENCES decks(id) ON DELETE SET NULL;
+    -- auto | manual (your pick; NULL deck = "no slides") | nothing (the video had no readable screens)
+    ALTER TABLE lectures ADD COLUMN deck_how TEXT;
+    ALTER TABLE lectures ADD COLUMN deck_score REAL;
+    ALTER TABLE lectures ADD COLUMN slides_aligned_at TEXT;
+    ALTER TABLE lectures ADD COLUMN slides_error TEXT;
     """,
 ]
 
@@ -625,15 +663,18 @@ def claim_job(kinds: list[str]) -> dict | None:
     return get_job(r["id"]) if r else None
 
 
-def run_job_now(job_id: int) -> dict:
+def run_job_now(job_id: int, wait_retry: bool = True) -> dict:
     """Claim one specific queued job and run it here (CLI use). If the server's worker got to it
-    first, wait for that run to finish instead."""
+    first, wait for that run to finish instead. A job that put itself off until later (RetryLater)
+    is waited out too, unless wait_retry=False: then it comes back still queued, with retry_at."""
     with db() as con:
         ok = con.execute("UPDATE jobs SET status='running', owner_pid=?, attempts=attempts+1 "
                          "WHERE id=? AND status='queued' RETURNING id", (os.getpid(), job_id)).fetchone()
     if ok:
         run_job(get_job(job_id))
     while (j := get_job(job_id))["status"] in ("queued", "running"):
+        if not wait_retry and j["status"] == "queued" and j["retry_at"]:
+            break
         time.sleep(1)
     return j
 
@@ -1143,7 +1184,10 @@ def release_duplicate(lecture_id: int) -> dict:
 def delete_lecture(lecture_id: int) -> None:
     with db() as con:
         con.execute("DELETE FROM lectures WHERE id=?", (lecture_id,))
+        ocr = con.execute("DELETE FROM decks WHERE key=? RETURNING id", (f"ocr:{lecture_id}",)).fetchone()
     shutil.rmtree(DATA / "media" / str(lecture_id), ignore_errors=True)
+    if ocr:  # its slides were read off its own video
+        shutil.rmtree(DATA / "slide-images" / str(ocr[0]), ignore_errors=True)
     log.info("deleted lecture %s", lecture_id)
 
 
@@ -1287,6 +1331,9 @@ def canvas_state() -> dict:
 def set_canvas_state(state: str, **info) -> None:
     prev = canvas_state().get("state")
     meta_set("canvas_state", {"state": state, "checked_at": datetime.now().isoformat(timespec="seconds"), **info})
+    if state == "connected" and prev != "connected":  # deck downloads waiting for you to sign in: go now
+        with db() as con:
+            con.execute("UPDATE jobs SET retry_at=NULL WHERE kind='deck_pull' AND status='queued'")
     if state == "needs_signin" and prev != "needs_signin":
         log.warning("Canvas session expired: needs sign-in (inbox folders keep working)")
         notify("LectureLab: Canvas needs sign-in",
@@ -1604,9 +1651,10 @@ def drive_list_folder(folder_id: str) -> list[dict]:
     return [{"id": f.id, "path": f.path} for f in files]
 
 
-def expand_drive_folders(items: dict[str, dict]) -> None:
+def expand_drive_folders(items: dict[str, dict], decks: dict[str, dict] | None = None) -> None:
     """Replace each linked Drive folder with one item per recording in it, so recordings are pulled
-    one at a time (a semester folder is many GB). A folder that can't be listed stays as it is."""
+    one at a time (a semester folder is many GB). A folder that can't be listed stays as it is.
+    Slide decks in the folder go into `decks` when it's given."""
     for key, it in list(items.items()):
         if it["kind"] != "drive_folder":
             continue
@@ -1622,10 +1670,16 @@ def expand_drive_folders(items: dict[str, dict]) -> None:
                     "key": f"drive:{f['id']}", "kind": "drive", "title": Path(f["path"]).stem,
                     "url": f"https://drive.google.com/file/d/{f['id']}/view",
                     "page_url": f"{it.get('page_url')} > {f['path']}", "page_link": it.get("page_link")})
+            elif decks is not None and Path(f["path"]).suffix.lower() in SLIDE_EXTS:
+                decks.setdefault(f"drive:{f['id']}", {
+                    "key": f"drive:{f['id']}", "source": "drive", "title": Path(f["path"]).stem,
+                    "url": f"https://drive.google.com/file/d/{f['id']}/view",
+                    "found_at": f"{it.get('page_url')} > {f['path']}"})
 
 
 def canvas_scan_course(course: dict, progress=None) -> dict:
-    """Find recordings in a course's Files, Modules, Pages and Announcements. Records new ones."""
+    """Find recordings and slide decks in a course's Files, Modules, Pages and Announcements.
+    Records new ones; new decks are downloaded right away (they're small)."""
     canvas_ready()  # not connected or needs sign-in: no browser, no "expired" toast
     with CanvasSession():
         return _canvas_scan_course(course, progress)
@@ -1636,19 +1690,28 @@ def _canvas_scan_course(course: dict, progress=None) -> dict:
     cid = course["canvas_id"]
     say = progress or (lambda m: None)
     items: dict[str, dict] = {}
+    decks: dict[str, dict] = {}
 
     def add(it):
         items.setdefault(it["key"], it)
 
     def add_file(f, where):
         mime = f.get("content-type") or f.get("mime_class") or ""
+        name = f.get("display_name", "")
         if mime.startswith(("video/", "audio/")) or mime in ("video", "audio") or \
-                Path(f.get("display_name", "")).suffix.lower() in MEDIA_EXTS:
-            add({"key": f"file:{f['id']}", "kind": "file", "title": Path(f.get("display_name", "")).stem,
+                Path(name).suffix.lower() in MEDIA_EXTS:
+            add({"key": f"file:{f['id']}", "kind": "file", "title": Path(name).stem,
                  "url": f"canvas-file:{f['id']}", "page_url": where, "created_at": f.get("created_at")})
+        elif (mime in SLIDE_MIMES or Path(name).suffix.lower() in SLIDE_EXTS) and \
+                (f.get("size") or 0) <= MAX_DECK_MB << 20:
+            decks.setdefault(f"canvas-file:{f['id']}", {
+                "key": f"canvas-file:{f['id']}", "source": "canvas", "title": Path(name).stem,
+                "url": f"canvas-file:{f['id']}", "found_at": where, "created_at": f.get("created_at")})
 
     say("files")
     for f in canvas_get(f"courses/{cid}/files", {"content_types[]": ["video", "audio"]}):
+        add_file(f, "course files")
+    for f in canvas_get(f"courses/{cid}/files", {"content_types[]": list(SLIDE_MIMES)}):
         add_file(f, "course files")
     say("modules")
     pages_to_read = set()
@@ -1685,7 +1748,7 @@ def _canvas_scan_course(course: dict, progress=None) -> dict:
             m["page_link"] = a.get("html_url")
             add(m)
     say("drive folders")
-    expand_drive_folders(items)
+    expand_drive_folders(items, decks)
     new = 0
     with db() as con:
         for it in items.values():
@@ -1694,8 +1757,10 @@ def _canvas_scan_course(course: dict, progress=None) -> dict:
                               (it["key"], course["id"], it["kind"], it.get("title"), it["url"], it.get("page_url"),
                                it.get("created_at"), it.get("page_link")))
             new += cur.rowcount
-    log.info("canvas scan %s: %s items (%s new)", course["code"], len(items), new)
-    return {"found": len(items), "new": new}
+    decks_new = record_decks(course["id"], decks)
+    log.info("canvas scan %s: %s items (%s new), %s decks (%s new)", course["code"], len(items), new,
+             len(decks), decks_new)
+    return {"found": len(items), "new": new, "decks": len(decks), "decks_new": decks_new}
 
 
 def canvas_file_source(file_id: int) -> tuple[str, str, dict]:
@@ -1718,13 +1783,18 @@ def canvas_media_source(mid: str) -> tuple[str, str, dict]:
                                                               "upload_date": mo.get("created_at")}
 
 
-def stream_download(url: str, out: Path, jar=None) -> Path:
+def stream_download(url: str, out: Path, jar=None, max_bytes: int | None = None) -> Path:
+    """Raises ValueError as soon as the file passes max_bytes."""
     import httpx
     out.parent.mkdir(parents=True, exist_ok=True)
     with httpx.stream("GET", url, follow_redirects=True, timeout=120, cookies=jar) as r:
         r.raise_for_status()
+        size = 0
         with open(out, "wb") as fh:
             for chunk in r.iter_bytes(1 << 20):
+                size += len(chunk)
+                if max_bytes and size > max_bytes:
+                    raise ValueError(f"download is over {max_bytes >> 20} MB")
                 fh.write(chunk)
     return out
 
@@ -1908,11 +1978,6 @@ def initial_prompt(lecture: dict) -> str:
     return text[:800].rsplit(" ", 1)[0] if len(text) > 800 else text
 
 
-def lecture_slide_terms(lecture_id: int) -> str:
-    """Hook for Stage 3: key terms from the slides matched to this lecture."""
-    return ""
-
-
 def store_transcript(lecture_id: int, result: dict, source: str) -> int:
     """Save a transcript (Colab or local JSON shape) and mark the lecture transcribed."""
     path = DATA / "transcripts" / f"{lecture_id}.json"
@@ -1925,8 +1990,9 @@ def store_transcript(lecture_id: int, result: dict, source: str) -> int:
                         [(lecture_id, i, s["start"], s["end"], s["text"], json.dumps(s.get("words") or []))
                          for i, s in enumerate(segs)])
         con.execute("UPDATE lectures SET status='transcribed', transcript_source=?, error=NULL, "
-                    "updated_at=datetime('now') WHERE id=?", (source, lecture_id))
+                    "slides_aligned_at=NULL, updated_at=datetime('now') WHERE id=?", (source, lecture_id))
     log.info("lecture %s transcribed by %s: %s segments", lecture_id, source, len(segs))
+    enqueue_slides(lecture_id)  # (re)align: the old slide numbers went with the old segments
     return len(segs)
 
 
@@ -2380,6 +2446,1046 @@ def reset_stuck_transcribing() -> int:
 JOB_HANDLERS["transcribe"] = job_transcribe
 
 
+# ---------------------------------------------------------------- slides
+SLIDE_EXTS = {".pdf", ".pptx", ".ppt"}
+SLIDE_MIMES = ("application/pdf", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+               "application/vnd.ms-powerpoint")
+SLIDES_DIR = DATA / "Slides"          # decks as downloaded, per course: Slides/<Course>/<file>
+SLIDE_IMAGES = DATA / "slide-images"  # page renders per deck (not "slides": Windows paths ignore case)
+THUMB_W, FULL_W = 320, 1280
+MAX_DECK_MB = int(os.environ.get("LECTURELAB_MAX_DECK_MB", 200))
+WINDOW_SEC = 30                       # transcript window compared against slide text
+MATCH_MIN, MATCH_MARGIN = 0.45, 0.1   # auto-match only a clear winner
+OCR_MAX_SCREENS = 150
+MAX_DECK_PAGES = 300                  # more is a textbook or reader, not a lecture's slides
+OCR_MAX_PAGES = 60                    # per deck: pages past this that need OCR keep what text they have
+OCR_THREADS = 2                       # of the laptop's cores, so OCR in the background doesn't hog it
+DECK_RETRY_SEC, DECK_MAX_TRIES = 600, 5  # a download that failed for a passing reason: wait 10, 20, ... min
+
+
+class DeckError(Exception):
+    """A deck that can't be used. The message says what happened and how to fix it."""
+
+
+def user_error(e: Exception, what: str) -> str:
+    """What to show for a failure: our own messages as they are. Anything else (ffmpeg's stderr,
+    a timeout's command line, an OS error) can carry local paths, so it gets a generic line and
+    the detail goes to server.log."""
+    if isinstance(e, (DeckError, CanvasError)):
+        return str(e)
+    log.warning("%s failed: %r", what, e)
+    return f"{what} failed unexpectedly ({type(e).__name__}). The details are in server.log."
+
+
+def get_deck(deck_id: int | None) -> dict | None:
+    if not deck_id:
+        return None
+    with db() as con:
+        r = con.execute("SELECT * FROM decks WHERE id=?", (deck_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def safe_filename(name: str, fallback: str = "slides") -> str:
+    """A file name that's safe on Windows: no path parts, reserved characters or device names."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", Path(name or "").name).strip(" .") or fallback
+    stem, suffix = Path(name).stem[:120], Path(name).suffix.lower()[:8]
+    if re.fullmatch(r"(?i)(con|prn|aux|nul|com\d|lpt\d)", stem.split(".")[0]):  # CON.tar.pdf is CON too
+        stem = "_" + stem
+    return stem + suffix
+
+
+# Lecture codes in titles and file names, each optionally a range ("M3TL2-3", "Lectures 4-5"):
+# the last group is the end of the range. Two titles with the same kind of code must overlap.
+_CODES = [re.compile(p, re.I) for p in (
+    r"\bm\s*0*(\d{1,2})\s*[-_ .]?\s*(t?)l\s*0*(\d{1,2})(?:\s*-\s*0*(\d{1,2}))?\b",  # M2L1, M2TL1 (a different
+                                                                                   # kind of lecture), M3TL2-3
+    r"\b(?:lectures?|lect|lec|l)\s*[-_#.]?\s*0*(\d{1,3})(?:\s*-\s*0*(\d{1,3}))?\b",  # Lecture 7, Lec07, L07
+    r"\b(?:week|wk)\s*[-_#.]?\s*0*(\d{1,2})(?:\s*-\s*0*(\d{1,2}))?\b",
+    r"\b(?:chapter|ch)\s*[-_#.]?\s*0*(\d{1,2})(?:\s*-\s*0*(\d{1,2}))?\b")]
+_TITLE_STOP = frozenset("a an and are as at be by for from in into is it of on or the to with lecture lec "
+                        "slides slide notes part pdf pptx ppt".split())
+
+
+def title_codes(text: str) -> dict[int, frozenset]:
+    """{kind: set of codes}. "M3TL2-3" is {("3", "t", 2), ("3", "t", 3)}: one deck, two lectures."""
+    out = {}
+    for i, rx in enumerate(_CODES):
+        m = rx.search(text or "")
+        if not m:
+            continue
+        *head, first, last = m.groups()
+        first = int(first)
+        last = int(last) if last and 0 < int(last) - first <= 5 else first
+        out[i] = frozenset((*(h.lower() for h in head), n) for n in range(first, last + 1))
+    return out
+
+
+def deck_capacity(title: str) -> int:
+    """How many lectures a deck can serve: one per lecture code its name covers."""
+    codes = title_codes(title)
+    return max([len(v) for k, v in codes.items() if k in (0, 1)] or [1])
+
+
+def _title_words(text: str) -> set[str]:
+    for rx in _CODES:
+        text = rx.sub(" ", text or "")
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _TITLE_STOP and len(w) > 1}
+
+
+def match_score(deck: dict, lec: dict) -> float:
+    """How likely this deck goes with this lecture, about 0 to 1: lecture codes in the names
+    (agreeing or contradicting), title word overlap, and how close the dates are."""
+    a, b = title_codes(deck["title"]), title_codes(lec["title"])
+    shared = a.keys() & b.keys()
+    code = (1.0 if all(a[k] & b[k] for k in shared) else -1.0) if shared else 0.0
+    wa, wb = _title_words(deck["title"]), _title_words(lec["title"])
+    words = len(wa & wb) / len(wa | wb) if wa and wb else 0.0
+    near = 0.0
+    try:
+        days = abs((Date.fromisoformat((deck.get("created_at") or "")[:10]) -
+                    Date.fromisoformat((lec.get("date") or "")[:10])).days)
+        near = max(0.0, 1 - days / 14)
+    except ValueError:
+        pass
+    return round(0.5 * code + 0.4 * words + 0.15 * near + (0.1 if words == 1 and code >= 0 else 0), 3)
+
+
+def _twin_key(title: str) -> str:
+    """Decks with the same name (the PDF and the PPTX of one lecture) are one candidate."""
+    return re.sub(r"\s+", " ", re.sub(r"(?i)\.(pdf|pptx?)$", "", (title or "").strip())).lower()
+
+
+def match_decks(course_id: int) -> list[int]:
+    """Auto-match a course's decks to its lectures: one deck per lecture, best pairs first, and
+    only clear winners (a near-tie is left for you to pick). A deck serves one lecture unless its
+    name covers several codes ("M3TL2-3"). Your own picks are never touched and use up a deck's
+    room. A match already made survives a new near-tie (a second copy of the deck, a review
+    deck); only a clearly better pairing replaces it. Returns lectures whose deck changed."""
+    with db() as con:
+        lecs = rows(con.execute("SELECT id, title, date, deck_id, deck_how FROM lectures WHERE course_id=? "
+                                "AND status NOT IN ('duplicate','ingesting')", (course_id,)))
+        decks = rows(con.execute("SELECT id, title, created_at, source, path FROM decks WHERE course_id=? "
+                                 "AND status!='error'", (course_id,)))
+    manual: dict[int, int] = {}
+    for l in lecs:
+        if l["deck_how"] == "manual" and l["deck_id"]:
+            manual[l["deck_id"]] = manual.get(l["deck_id"], 0) + 1
+    auto = [l for l in lecs if l["deck_how"] != "manual"]
+    current = {l["id"]: l["deck_id"] for l in auto if l["deck_id"]}
+    in_use = set(current.values()) | set(manual)
+    twins: dict[str, list[dict]] = {}
+    for d in decks:
+        if d["source"] != "ocr":
+            twins.setdefault(_twin_key(d["title"]), []).append(d)
+    # of each set of twins: the one already in use, else the PDF, else the oldest
+    real = [min(g, key=lambda d: (d["id"] not in in_use, not (d["path"] or "").lower().endswith(".pdf"), d["id"]))
+            for g in twins.values()]
+    room = {d["id"]: deck_capacity(d["title"]) - manual.get(d["id"], 0) for d in real}
+    real = [d for d in real if room[d["id"]] > 0]
+    scores = {(l["id"], d["id"]): match_score(d, l) for l in auto for d in real}
+    pick: dict[int, tuple[int, float]] = {}
+    for (lid, did), s in sorted(scores.items(), key=lambda kv: -kv[1]):
+        if s < MATCH_MIN:
+            break
+        if lid in pick or not room[did]:
+            continue
+        # Ambiguous: another free deck fits this lecture about as well, or this deck (with room
+        # for just one more) fits another unmatched lecture about as well.
+        rivals = [v for (l2, d2), v in scores.items() if l2 == lid and d2 != did and room[d2]]
+        if room[did] == 1:
+            rivals += [v for (l2, d2), v in scores.items() if d2 == did and l2 != lid and l2 not in pick]
+        if rivals and max(rivals) > s - MATCH_MARGIN and current.get(lid) != did:
+            continue
+        pick[lid] = (did, s)
+        room[did] -= 1
+    ocr = {d["id"] for d in decks if d["source"] == "ocr"}
+    changed = []
+    # Each write only lands if the lecture is as read above: a pick you made meanwhile wins.
+    still = "AND deck_id IS ? AND COALESCE(deck_how,'')!='manual'"
+    with db() as con:
+        for l in auto:
+            new = pick.get(l["id"])
+            if new and l["deck_id"] != new[0]:
+                cur = con.execute(f"UPDATE lectures SET deck_id=?, deck_how='auto', deck_score=?, slides_aligned_at=NULL, "
+                                  f"slides_error=NULL WHERE id=? {still}", (new[0], new[1], l["id"], l["deck_id"]))
+            elif new:
+                con.execute(f"UPDATE lectures SET deck_score=? WHERE id=? {still}", (new[1], l["id"], l["deck_id"]))
+                continue
+            elif l["deck_id"] and l["deck_id"] not in ocr:  # its old match lost to a better lecture
+                cur = con.execute(f"UPDATE lectures SET deck_id=NULL, deck_how=NULL, deck_score=NULL, "
+                                  f"slides_aligned_at=NULL, slides_error=NULL WHERE id=? {still}",
+                                  (l["id"], l["deck_id"]))
+            else:
+                continue
+            if cur.rowcount:
+                con.execute("UPDATE segments SET slide_no=NULL WHERE lecture_id=?", (l["id"],))
+                changed.append(l["id"])
+    if changed:
+        log.info("slides: course %s re-matched lectures %s", course_id, changed)
+    return changed
+
+
+def enqueue_slides(lecture_id: int) -> int | None:
+    """Queue a slides job (find the deck, read it, align it) unless one is already waiting.
+    Returns the job id, the waiting one's if there is one."""
+    with db() as con:
+        if q := con.execute("SELECT id FROM jobs WHERE kind='slides' AND lecture_id=? AND status='queued'",
+                            (lecture_id,)).fetchone():
+            return q[0]
+        r = con.execute("SELECT d.title, d.source FROM lectures l LEFT JOIN decks d ON d.id=l.deck_id "
+                        "WHERE l.id=?", (lecture_id,)).fetchone()
+    title = ("video frames" if r["source"] == "ocr" else r["title"]) if r and r["title"] else "slides"
+    jid = enqueue("slides", {"lecture_id": lecture_id, "title": title}, lecture_id=lecture_id)
+    wake_workers()
+    return jid
+
+
+# --- reading decks
+def render_fixed(page, w: int, h: int):
+    """Render a PDF page into exactly w x h (letterboxed on white if its shape differs), so every
+    thumbnail of a deck is the same size and the UI can reserve the space before it loads."""
+    import pymupdf as fitz
+    zoom = min(w / page.rect.width, h / page.rect.height)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    if (pix.width, pix.height) == (w, h):
+        return pix
+    out = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, w, h), False)
+    out.clear_with(255)
+    pix.set_origin((w - pix.width) // 2, (h - pix.height) // 2)
+    out.copy(pix, pix.irect)
+    return out
+
+
+def page_title(page, text: str) -> str:
+    """The line set in the largest type, else the first line."""
+    best, size = "", 0.0
+    for b in page.get_text("dict").get("blocks", []):
+        for line in b.get("lines", []):
+            t = "".join(s["text"] for s in line["spans"]).strip()
+            sz = max((s["size"] for s in line["spans"]), default=0)
+            if t and sz > size + 0.5:
+                best, size = t, sz
+    best = best or next((l.strip() for l in text.splitlines() if l.strip()), "")
+    return best[:120]
+
+
+_ocr_engine = None
+_ocr_lock = threading.Lock()
+
+
+def ocr_image(path: Path) -> str:
+    """Text in an image, line by line (RapidOCR: pip-installed, runs on the CPU, models bundled)."""
+    global _ocr_engine
+    with _ocr_lock:
+        if _ocr_engine is None:
+            from rapidocr import RapidOCR
+            logging.getLogger("RapidOCR").setLevel(logging.WARNING)
+            _ocr_engine = RapidOCR(params={"EngineConfig.onnxruntime.intra_op_num_threads": OCR_THREADS,
+                                           "EngineConfig.onnxruntime.inter_op_num_threads": 1})
+        res = _ocr_engine(str(path))
+    return "\n".join(t.strip() for t in (res.txts or ()) if t and t.strip())
+
+
+def pptx_to_pdf(src: Path, out_dir: Path) -> Path:
+    """LibreOffice headless, with its own throwaway profile so an open LibreOffice window (or a
+    second conversion) can't block it. On Windows soffice.exe is a launcher for soffice.bin, so a
+    timeout kills the whole tree; killing just the launcher would leave soffice.bin running."""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as prof:
+        p = subprocess.Popen([str(c) for c in (find_tool("soffice"), f"-env:UserInstallation={Path(prof).as_uri()}",
+                                               "--headless", "--convert-to", "pdf", "--outdir", out_dir, src)],
+                             creationflags=NO_WINDOW, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        try:
+            code = p.wait(timeout=300)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], creationflags=NO_WINDOW,
+                               capture_output=True)
+            p.kill()
+            p.wait()
+            raise RuntimeError("LibreOffice took over 5 minutes to convert the deck")
+        if code != 0:
+            raise RuntimeError(f"LibreOffice failed ({code})")
+    pdf = out_dir / f"{src.stem}.pdf"
+    if not pdf.is_file():
+        raise RuntimeError("LibreOffice finished without writing a PDF")
+    return pdf
+
+
+def pptx_text(src: Path) -> list[dict]:
+    from pptx import Presentation
+    pages = []
+    for i, slide in enumerate(Presentation(str(src)).slides, 1):
+        texts = [sh.text_frame.text.strip() for sh in slide.shapes if sh.has_text_frame and sh.text_frame.text.strip()]
+        title = slide.shapes.title.text.strip() if slide.shapes.title is not None and slide.shapes.title.has_text_frame else ""
+        pages.append({"no": i, "text": "\n".join(texts), "title": (title or (texts[0] if texts else ""))[:120]})
+    return pages
+
+
+def _picture_share(page) -> float:
+    """How much of the page pictures cover (a scanned slide is one page-sized picture)."""
+    area = page.rect.get_area()
+    if not area:
+        return 0.0
+    covered = sum((type(page.rect)(i["bbox"]) & page.rect).get_area() for i in page.get_image_info())
+    return min(1.0, covered / area)
+
+
+def extract_deck(deck_id: int, progress=None) -> dict:
+    """Read a downloaded deck: each page's text and title, plus PNG renders 320 and 1280 px wide.
+    A PPTX goes through LibreOffice to PDF; if that fails, python-pptx gives text without images.
+    A page with almost no text (a scan) is read with OCR."""
+    import pymupdf as fitz
+    say = progress or (lambda m: None)
+    deck = get_deck(deck_id)
+    src = DATA / deck["path"]
+    out = SLIDE_IMAGES / str(deck_id)
+    shutil.rmtree(out, ignore_errors=True)  # best effort: an image open in a browser stays (and is overwritten)
+    out.mkdir(parents=True, exist_ok=True)
+    pdf, pages, size = src, [], (None, None)
+    if src.suffix.lower() in (".pptx", ".ppt"):
+        say("converting to PDF")
+        try:
+            pdf = pptx_to_pdf(src, out)
+        except Exception as e:
+            if src.suffix.lower() == ".ppt":
+                log.warning("deck %s: LibreOffice failed on the .ppt: %s", deck_id, e)
+                raise DeckError("This .ppt couldn't be converted. Save it as PDF or .pptx and attach that.") from e
+            log.warning("deck %s: LibreOffice failed, using the PPTX text only: %s", deck_id, e)
+            pdf = None
+    if pdf:
+        try:
+            doc = fitz.open(pdf)
+        except Exception as e:  # the library's message names our file path: log it, don't show it
+            log.warning("deck %s: can't open %s: %s", deck_id, pdf, e)
+            raise DeckError("This PDF couldn't be opened; it may be damaged or not really a PDF. "
+                            "Export it again and attach that.") from e
+        with doc:
+            if doc.page_count == 0:
+                raise DeckError("This PDF has no pages. Export the deck again and attach that.")
+            if doc.page_count > MAX_DECK_PAGES:
+                raise DeckError(f"This PDF has {doc.page_count} pages, more than a lecture's slides (it may be a "
+                                "textbook or a reader). Attach the lecture's own deck instead.")
+            r0 = doc[0].rect
+            size = (THUMB_W, round(THUMB_W * r0.height / r0.width))
+            ocr_left = OCR_MAX_PAGES
+            for i, page in enumerate(doc, 1):
+                say(f"extracting page {i} of {doc.page_count}")
+                for w in (THUMB_W, FULL_W):
+                    render_fixed(page, w, round(w * r0.height / r0.width)).save(out / f"{i}-{w}.png")
+                text = page.get_text().strip()
+                # A scan: almost no text, or a page-sized picture with only a footer's worth.
+                if ocr_left and (len(text) < 20 or (len(text) < 200 and _picture_share(page) > 0.5)):
+                    ocr_left -= 1
+                    text = ocr_image(out / f"{i}-{FULL_W}.png") or text  # it reads the footer too
+                pages.append({"no": i, "text": text, "title": page_title(page, text)})
+    else:
+        try:
+            pages = pptx_text(src)
+        except Exception as e:
+            log.warning("deck %s: python-pptx can't read it: %s", deck_id, e)
+            raise DeckError("This PowerPoint couldn't be read. Export it as PDF and attach that.") from e
+        if not pages:
+            raise DeckError("This PowerPoint has no slides. Export the deck again and attach that.")
+    with db() as con:
+        con.execute("DELETE FROM slides WHERE deck_id=?", (deck_id,))
+        con.executemany("INSERT INTO slides(deck_id, no, title, text) VALUES (?,?,?,?)",
+                        [(deck_id, p["no"], p["title"], p["text"]) for p in pages])
+        con.execute("UPDATE decks SET pages=?, thumb_w=?, thumb_h=?, extracted_at=?, status='ready', error=NULL "
+                    "WHERE id=?", (len(pages), *size, time.time(), deck_id))
+    log.info("deck %s (%s): %s pages", deck_id, deck["title"], len(pages))
+    return {"pages": len(pages)}
+
+
+# --- slides read off the video, for lectures with no deck
+SCREEN_W, SCREEN_H = 160, 90  # keyframes are compared at this size: big enough to see slide text change
+
+
+def find_screens(frames, ts: list[float], end: float, change: float = 0.005, min_sec: float = 8.0) -> list[dict]:
+    """Group keyframes (small grey images, one per entry of ts) into runs that stay put, drop
+    runs shorter than min_sec (scrolling, transitions), and fold runs that look the same into one
+    screen, so going back to a slide is a revisit. Two frames differ when more than `change` of
+    their pixels moved by over 12 grey levels, ignoring pixels that change most of the time (a
+    webcam inset, a clock). Mean difference doesn't work: two slides from one template differ
+    in a few lines of text, under 1% of the picture. Screens come back in first-seen order, each
+    with the keyframe index to grab (the run's last frame: a slide that builds up is complete)."""
+    import numpy as np
+    frames = np.asarray(frames)  # kept as given (uint8 from ffmpeg): pairs are compared one at a time
+    n = len(frames)
+    if n == 0:
+        return []
+    moved = lambda i: np.abs(frames[i].astype(np.int16) - frames[i - 1]) > 12  # noqa: E731
+    counts = np.zeros(frames.shape[1:], np.int32)
+    for i in range(1, n):
+        counts += moved(i)
+    live = ~(counts > 0.3 * (n - 1))
+    differ = lambda a, b: float(((np.abs(a - b.astype(np.int16)) > 12) & live).mean()) > change  # noqa: E731
+    runs, start = [], 0
+    for i in range(1, n + 1):
+        if i == n or float((moved(i) & live).mean()) > change:
+            runs.append((start, i - 1))
+            start = i
+    screens: list[dict] = []
+    for a, b in runs:
+        t0, t1 = ts[a], (ts[b + 1] if b + 1 < len(ts) else end)
+        if t1 - t0 < min_sec:
+            continue
+        for s in screens:
+            if not differ(s["img"], frames[b]):
+                s["times"].append([t0, t1])
+                break
+        else:
+            screens.append({"img": frames[b].astype(np.int16), "grab": b, "grab_t": ts[b], "times": [[t0, t1]]})
+    return screens
+
+
+def _merge_times(times: list[list[float]]) -> list[list[float]]:
+    out: list[list[float]] = []
+    for s, e in sorted(times):
+        if out and s - out[-1][1] < 1.0:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [[round(s, 2), round(e, 2)] for s, e in out]
+
+
+def video_screens(lec: dict) -> tuple[list[dict], int]:
+    """The lecture video's distinct screens (find_screens) and how many keyframes were read.
+    Only keyframes are decoded, small and grey, at most one per 2 s (a recording with a keyframe
+    every frame would otherwise be gigabytes): about 35 s for 50 minutes of 1440p."""
+    import numpy as np
+    r = run([find_tool("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info", "-skip_frame", "nokey",
+             "-i", DATA / lec["video_path"], "-an", "-vf",
+             f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,2)',scale={SCREEN_W}:{SCREEN_H},"
+             "format=gray,showinfo", "-fps_mode", "passthrough", "-f", "rawvideo", "-"], timeout=3600, low=True)
+    ts: list[float] = []
+    for x in re.findall(rb"pts_time:(\S+)", r.stderr):  # one per frame, even an odd "nan" or negative one
+        try:
+            t = float(x)
+        except ValueError:
+            t = float("nan")
+        ts.append(t if t == t else (ts[-1] if ts else 0.0))
+    frames = np.frombuffer(r.stdout, np.uint8).reshape(-1, SCREEN_H, SCREEN_W)
+    if len(ts) != len(frames):
+        log.warning("lecture %s: %s keyframes but %s timestamps; using the shorter", lec["id"], len(frames), len(ts))
+    n = min(len(ts), len(frames))
+    return find_screens(frames[:n], ts[:n], lec.get("duration_sec") or (ts[n - 1] if n else 0)), n
+
+
+def ocr_video_deck(lec: dict, progress=None) -> int | None:
+    """A deck made from the video for a lecture without slides: one page per distinct screen,
+    read with OCR. Only keyframes are decoded (small and grey) to find screens, so a 50-minute
+    1440p recording takes about half a minute; just the chosen frames are decoded at full size.
+    Returns the deck id, or None when no screen has readable text (a talking head, a dark room)."""
+    import pymupdf as fitz
+    say = progress or (lambda m: None)
+    video, ff = DATA / lec["video_path"], find_tool("ffmpeg")
+    say("finding the distinct screens in the video")
+    screens, n = video_screens(lec)
+    if len(screens) > OCR_MAX_SCREENS:  # keep the ones on screen longest
+        screens = sorted(screens, key=lambda s: -sum(e - b for b, e in s["times"]))[:OCR_MAX_SCREENS]
+        screens.sort(key=lambda s: s["times"][0][0])
+    if not screens:
+        return None
+    key = f"ocr:{lec['id']}"
+    with db() as con:  # look up first: UNIQUE(course_id, key) doesn't hold when course_id is NULL
+        r = con.execute("SELECT id FROM decks WHERE key=?", (key,)).fetchone()
+        did = r[0] if r else con.execute("INSERT INTO decks(course_id, key, source, title) VALUES (?,?,?,?)",
+                                         (lec["course_id"], key, "ocr", "Video frames")).lastrowid
+    out = SLIDE_IMAGES / str(did)
+    shutil.rmtree(out, ignore_errors=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        kept: list[dict] = []
+        for i, s in enumerate(screens, 1):
+            say(f"reading screen {i} of {len(screens)}")
+            # The time is a keyframe's, so seeking before -i lands on exactly that frame, fast.
+            img = Path(tmp) / f"{i}.png"
+            run([ff, "-hide_banner", "-nostdin", "-v", "error", "-ss", f"{s['grab_t']:.3f}", "-i", video, "-an",
+                 "-frames:v", "1", "-vf", f"scale={FULL_W}:-2", img], timeout=300, low=True)
+            if not img.is_file():
+                continue
+            text = ocr_image(img)
+            words = set(re.findall(r"[a-z0-9]{3,}", text.lower()))
+            if len(words) < 3:
+                continue
+            for k in kept:  # the same slide with a cursor or webcam change: one page
+                if len(words & k["words"]) / len(words | k["words"]) >= 0.85:
+                    k["times"] += s["times"]
+                    break
+            else:
+                kept.append({"img": img, "text": text, "words": words, "times": s["times"]})
+        if len(kept) < 2:
+            with db() as con:
+                con.execute("DELETE FROM decks WHERE id=?", (did,))
+            return None
+        out.mkdir(parents=True, exist_ok=True)
+        size = None
+        for no, k in enumerate(kept, 1):
+            full = fitz.Pixmap(str(k["img"]))
+            size = size or (THUMB_W, round(THUMB_W * full.height / full.width))
+            full.save(out / f"{no}-{FULL_W}.png")
+            fitz.Pixmap(full, *size).save(out / f"{no}-{THUMB_W}.png")
+    with db() as con:
+        con.execute("DELETE FROM slides WHERE deck_id=?", (did,))
+        con.executemany("INSERT INTO slides(deck_id, no, title, text, times) VALUES (?,?,?,?,?)",
+                        [(did, no, k["text"].splitlines()[0][:120], k["text"], json.dumps(_merge_times(k["times"])))
+                         for no, k in enumerate(kept, 1)])
+        con.execute("UPDATE decks SET pages=?, thumb_w=?, thumb_h=?, extracted_at=?, status='ready', error=NULL "
+                    "WHERE id=?", (len(kept), *size, time.time(), did))
+    log.info("lecture %s: %s screen(s) read from the video (%s keyframes)", lec["id"], len(kept), n)
+    return did
+
+
+# --- alignment
+_ALIGN_STOP = frozenset((
+    "the and for are but not you all any can her was one our out has have had him his how its may new now "
+    "see two way who did get let put say she too use that this with from they will what when your which "
+    "their there then them these those were been being into just like also more some than very only over "
+    "such here where would could should about after before because between each other does doing going "
+    "okay yeah right really thing things kind sort want know think gonna mean look well good so").split())
+
+
+def _tokens(text: str) -> list[str]:
+    out = []
+    for w in re.findall(r"[a-z][a-z0-9_]+", (text or "").lower()):
+        if len(w) < 3 or w in _ALIGN_STOP:
+            continue
+        if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.append(w)
+    return out
+
+
+def tfidf_sim(win_texts: list[str], slide_texts: list[str]):
+    """Cosine similarity (windows x slides) over the slides' own vocabulary, idf from the slides:
+    words on every slide (the course name in a footer) count for little."""
+    import numpy as np
+    docs = [_tokens(t) for t in slide_texts]
+    vocab: dict[str, int] = {}
+    for d in docs:
+        for w in d:
+            vocab.setdefault(w, len(vocab))
+    if not vocab:
+        return np.zeros((len(win_texts), len(slide_texts)))
+    df = np.zeros(len(vocab))
+    for d in docs:
+        for w in set(d):
+            df[vocab[w]] += 1
+    idf = np.log((1 + len(docs)) / (1 + df)) + 1
+
+    def vec(tokens):
+        v = np.zeros(len(vocab))
+        for w in tokens:
+            if w in vocab:
+                v[vocab[w]] += 1
+        v *= idf
+        n = np.linalg.norm(v)
+        return v / n if n else v
+
+    return np.stack([vec(_tokens(t)) for t in win_texts]) @ np.stack([vec(d) for d in docs]).T
+
+
+# Costs, in units of a typical window's best match. Picked on three real COP4020 lectures by
+# scoring text-only alignment against the slides their videos showed: 77% of segments exact.
+ALIGN_SKIP, ALIGN_SKIP_MAX, ALIGN_BACK = 0.6, 1.5, 0.8
+
+
+def align_windows(sim, visual=None, off=None) -> list[int | None] | None:
+    """One slide per window (0-based), by dynamic programming: slide numbers mostly go forward, a
+    skip costs more the further it goes, and stepping back one slide is allowed at a price
+    (lecturers go back). Windows with no evidence keep the current slide. `visual` (windows x
+    slides, 0 to 1) adds how much the screen looks like each slide; `off` windows showed no slide
+    at all (a coding demo) and get None. None when nothing matches anything."""
+    import numpy as np
+    W, S = sim.shape
+    if W == 0 or S == 0:
+        return [] if W == 0 else None
+    peak = sim.max(axis=1)
+    gain = sim / peak[peak > 0].mean() if (peak > 0).any() else np.zeros_like(sim)
+    if visual is not None:
+        gain = gain + 2 * visual  # a screen that looks like the slide is the strongest evidence there is
+    keep = [w for w in range(W) if not (off and off[w])]
+    if not keep or not gain[keep].any():
+        return None
+    gain = gain[keep]
+    k = np.arange(S)
+    step = k[None, :] - k[:, None]  # step[i, j]: going from slide i to slide j
+    trans = np.full((S, S), -np.inf)
+    trans[step == 0] = 0.0
+    trans[step == 1] = -0.05
+    big = step >= 2
+    trans[big] = -np.minimum(ALIGN_SKIP + 0.1 * (step[big] - 2), ALIGN_SKIP_MAX)
+    trans[step == -1] = -ALIGN_BACK
+    score = gain[0] - np.minimum(0.05 * k, 0.5)  # a lecture usually starts near the first slide
+    back = np.zeros((len(keep), S), dtype=int)
+    for w in range(1, len(keep)):
+        cand = score[:, None] + trans
+        back[w] = cand.argmax(axis=0)
+        score = cand.max(axis=0) + gain[w]
+    path = [int(score.argmax())]
+    for w in range(len(keep) - 1, 0, -1):
+        path.append(int(back[w][path[-1]]))
+    out: list[int | None] = [None] * W
+    for w, s in zip(keep, reversed(path)):
+        out[w] = s
+    return out
+
+
+VISUAL_NEAR, VISUAL_FAR = 0.15, 0.30  # share of pixels that differ: "this slide" / "not a slide"
+
+
+def slide_greys(deck: dict):
+    """Each page's render, grey and the size keyframes are compared at."""
+    import numpy as np
+    import pymupdf as fitz
+    out = []
+    for no in range(1, deck["pages"] + 1):
+        p = fitz.Pixmap(fitz.Pixmap(fitz.csGRAY, fitz.Pixmap(str(SLIDE_IMAGES / str(deck["id"]) / f"{no}-{THUMB_W}.png"))),
+                        SCREEN_W, SCREEN_H)
+        out.append(np.frombuffer(p.samples, np.uint8).reshape(p.height, p.stride)[:, :SCREEN_W])
+    return np.stack(out).astype(np.int16)
+
+
+def visual_evidence(lec: dict, deck: dict, segs: list[dict], wins: list[list[int]]):
+    """Compare what the video shows with the deck's pages. Returns (windows x slides closeness,
+    off-slide flags), or None when the video doesn't show the slides full screen (a camera on a
+    projector, audio only), in which case the text decides alone."""
+    import numpy as np
+    if not lec.get("video_path") or not deck.get("thumb_w"):
+        return None
+    try:
+        screens, _ = video_screens(lec)
+        greys = slide_greys(deck)
+    except Exception as e:
+        log.warning("lecture %s: can't compare the video with the slides: %s", lec["id"], e)
+        return None
+    if not screens:
+        return None
+    dist = np.array([[float((np.abs(s["img"] - g) > 24).mean()) for g in greys] for s in screens])
+    spans = [(t0, t1, i) for i, s in enumerate(screens) for t0, t1 in s["times"]]
+    shown = sum(t1 - t0 for t0, t1, i in spans if dist[i].min() < VISUAL_NEAR)
+    if shown < 0.1 * sum(t1 - t0 for t0, t1, _ in spans):
+        return None
+    vis, off = np.zeros((len(wins), len(greys))), [False] * len(wins)
+    for w, idx in enumerate(wins):
+        a, b = segs[idx[0]]["start"], segs[idx[-1]]["end"]
+        cover = {}
+        for t0, t1, i in spans:
+            if min(b, t1) > max(a, t0):
+                cover[i] = cover.get(i, 0) + min(b, t1) - max(a, t0)
+        if not cover or max(cover.values()) < 0.5 * (b - a):
+            continue  # mostly transitions: no visual evidence
+        d = dist[max(cover, key=cover.get)]
+        if d.min() > VISUAL_FAR:
+            off[w] = True
+        else:
+            vis[w] = np.clip(1 - d / VISUAL_NEAR, 0, 1)
+    log.info("lecture %s: the video shows the slides %.0f%% of the time, %s of %s windows off-slide",
+             lec["id"], 100 * shown / max(1, sum(t1 - t0 for t0, t1, _ in spans)), sum(off), len(wins))
+    return vis, off
+
+
+def make_windows(segs: list[dict], sec: float = WINDOW_SEC) -> list[list[int]]:
+    """Consecutive segments grouped into windows of about `sec` seconds (indexes into segs)."""
+    out: list[list[int]] = []
+    for i, s in enumerate(segs):
+        if out and s["end"] - segs[out[-1][0]]["start"] <= sec:
+            out[-1].append(i)
+        else:
+            out.append([i])
+    return out
+
+
+def align_lecture(lecture_id: int) -> int:
+    """Give every segment the slide on screen while it was said: from the video when it shows the
+    slides, otherwise from the words. Segments during something that isn't a slide (a coding
+    demo) get none. Returns how many segments got a slide."""
+    lec = get_lecture(lecture_id)
+    deck = get_deck(lec["deck_id"]) if lec else None
+    if not deck:
+        return 0  # the deck was changed or removed meanwhile: that change queued its own job
+    with db() as con:
+        segs = rows(con.execute("SELECT idx, start, end, text FROM segments WHERE lecture_id=? ORDER BY idx",
+                                (lecture_id,)))
+        slides = rows(con.execute("SELECT no, text, times FROM slides WHERE deck_id=? ORDER BY no", (deck["id"],)))
+    if not slides:
+        raise DeckError("The deck has no pages. Attach the deck again.")
+    if deck["source"] == "ocr":  # the screens carry their own times
+        spans = sorted((s0, s1, sl["no"]) for sl in slides for s0, s1 in json.loads(sl["times"] or "[]"))
+        nos = []
+        for sg in segs:
+            mid = (sg["start"] + sg["end"]) / 2
+            inside = [no for s0, s1, no in spans if s0 <= mid < s1]
+            before = [no for s0, _, no in spans if s0 <= mid]
+            nos.append(inside[-1] if inside else before[-1] if before else spans[0][2])
+    else:
+        wins = make_windows(segs)
+        sim = tfidf_sim([" ".join(segs[i]["text"] for i in w) for w in wins], [sl["text"] for sl in slides])
+        vis = visual_evidence(lec, deck, segs, wins)
+        path = align_windows(sim, *(vis or (None, None)))
+        if path is None:
+            raise DeckError("Nothing on these slides matches what was said. Check that it's the right deck "
+                            "(pick another under Slides), or attach a PDF with real text instead of images.")
+        nos = [None] * len(segs)
+        for w, s in zip(wins, path):
+            for i in w:
+                nos[i] = None if s is None else slides[s]["no"]
+    with db() as con:  # only if the deck is still the one aligned to (a pick meanwhile wins)
+        if not con.execute("UPDATE lectures SET slides_aligned_at=datetime('now'), slides_error=NULL "
+                           "WHERE id=? AND deck_id=?", (lecture_id, deck["id"])).rowcount:
+            return 0
+        con.executemany("UPDATE segments SET slide_no=? WHERE lecture_id=? AND idx=?",
+                        [(no, lecture_id, sg["idx"]) for sg, no in zip(segs, nos)])
+    log.info("lecture %s aligned to deck %s: %s segments, %s slides used", lecture_id, deck["id"], len(segs),
+             len(set(nos) - {None}))
+    return sum(no is not None for no in nos)
+
+
+def job_slides(job: dict) -> dict:
+    """payload: {lecture_id}. Find the lecture's deck (or read slides off its video), then align."""
+    lid = job["payload"]["lecture_id"]
+    say = lambda m: job_update(job["id"], progress=m)  # noqa: E731
+    lec = get_lecture(lid)
+    if not lec:
+        return {"skipped": "lecture deleted"}
+    with db() as con:  # a new attempt: the last one's error no longer applies
+        con.execute("UPDATE lectures SET slides_error=NULL WHERE id=?", (lid,))
+    try:
+        if lec["course_id"] and lec["deck_how"] != "manual":
+            for other in match_decks(lec["course_id"]):
+                if other != lid:
+                    enqueue_slides(other)
+            lec = get_lecture(lid)
+        transcribed = lec["segment_count"] > 0
+        if not lec["deck_id"]:
+            if lec["deck_how"] == "manual":
+                return {"slides": "none (your choice)"}
+            if not lec["video_path"] or not transcribed:
+                return {"waiting": "no slides, and no transcript yet" if lec["video_path"] else "no slides"}
+            with db() as con:
+                r = con.execute("SELECT id FROM decks WHERE key=? AND status='ready'", (f"ocr:{lid}",)).fetchone()
+            did = r[0] if r else ocr_video_deck(lec, say)
+            with db() as con:  # OCR takes minutes: a deck you picked or attached meanwhile wins
+                con.execute("UPDATE lectures SET deck_id=?, deck_how=? WHERE id=? AND deck_id IS NULL "
+                            "AND COALESCE(deck_how,'')!='manual'", (did, "auto" if did else "nothing", lid))
+            lec = get_lecture(lid)
+            if not lec["deck_id"]:
+                return {"slides": "none found in the video" if lec["deck_how"] == "nothing" else "none (your choice)"}
+        deck = get_deck(lec["deck_id"])
+        if not deck:
+            return {"skipped": "the deck was removed"}
+        if deck["status"] == "new":
+            return {"waiting": "downloading the slides"}  # the download queues this lecture again
+        if deck["status"] == "error":
+            raise DeckError(deck["error"] or "The deck couldn't be read. Attach it again.")
+        if not transcribed:
+            return {"waiting": "no transcript yet"}  # storing the transcript queues it again
+        say("aligning")
+        return {"deck": deck["title"], "pages": deck["pages"], "segments": align_lecture(lid)}
+    except Exception as e:
+        with db() as con:
+            con.execute("UPDATE lectures SET slides_error=? WHERE id=?", (user_error(e, "Lining up the slides"), lid))
+        raise
+
+
+def _download_deck(deck: dict, tmp: Path) -> Path:
+    if deck["source"] == "canvas":
+        canvas_ready()
+        with CanvasSession() as cs:
+            url, name, _ = canvas_file_source(int(deck["url"].split(":", 1)[1]))
+            jar = cs.httpx_cookies()
+        try:
+            return stream_download(url, tmp / safe_filename(name), jar, max_bytes=MAX_DECK_MB << 20)
+        except ValueError as e:
+            raise DeckError(f"The deck is over {MAX_DECK_MB} MB. Attach a smaller PDF export instead.") from e
+    if deck["source"] == "drive":
+        import gdown
+        tmp.mkdir(parents=True, exist_ok=True)
+        got = gdown.download(id=deck["key"].split(":", 1)[1], output=str(tmp) + os.sep, quiet=True)
+        if not got:
+            raise RuntimeError("Google Drive didn't return the file")  # quota or a hiccup: retried
+        return Path(got)
+    raise DeckError(f"A {deck['source']} deck has nothing to download.")
+
+
+def retry_deck(deck_id: int) -> bool:
+    """Download a deck that failed again (you asked to retry). False if there's nothing to fetch."""
+    deck = get_deck(deck_id)
+    if not deck or deck["status"] != "error" or deck["source"] not in ("canvas", "drive"):
+        return False
+    with db() as con:
+        con.execute("UPDATE decks SET status='new', error=NULL WHERE id=?", (deck_id,))
+    enqueue("deck_pull", {"deck_id": deck_id, "title": deck["title"]})
+    wake_workers()
+    return True
+
+
+def job_deck_pull(job: dict) -> dict:
+    """payload: {deck_id}. Download a deck listed on Canvas or Drive, read it, then re-match its
+    course and queue alignment for every lecture whose deck changed or was waiting on this one.
+    A download that fails for a passing reason (Canvas signed out, the browser busy, the network,
+    Drive's quota) leaves the deck waiting and tries again later; only a bad file is an error."""
+    did = job["payload"]["deck_id"]
+    deck = get_deck(did)
+    if not deck:
+        return {"skipped": "deck deleted"}
+    say = lambda m: job_update(job["id"], progress=m)  # noqa: E731
+    tmp = DATA / "downloads" / f"job{job['id']}"
+    try:
+        say(f"downloading {deck['title']}")
+        try:
+            f = _download_deck(deck, tmp)
+        except DeckError:
+            raise
+        except Exception as e:
+            signed_out = deck["source"] == "canvas" and canvas_state().get("state") != "connected"
+            tries = job["payload"].get("tries", 0) + (0 if signed_out else 1)
+            if tries < DECK_MAX_TRIES:  # signed out doesn't count: it waits until you sign in
+                wait = 1800 if signed_out else DECK_RETRY_SEC * tries
+                # attempts counts crashed runs (requeue_orphaned_jobs); these ran fine, so start over
+                job_update(job["id"], status="queued", retry_at=_sqlnow(wait), owner_pid=None, attempts=0,
+                           payload={**job["payload"], "tries": tries},
+                           progress="waiting for Canvas sign-in" if signed_out else "download failed; trying again later")
+                raise RetryLater(f"deck {did}: {e!r}") from e
+            log.warning("deck %s: download failed %s times, last: %r", did, tries, e)
+            raise DeckError(f"Downloading this deck failed {DECK_MAX_TRIES} times. Look for slides again to "
+                            "retry, or download it yourself and attach it.") from e
+        if f.suffix.lower() not in SLIDE_EXTS:
+            raise DeckError(f"The download is a {f.suffix or 'file without an extension'}, not a PDF or PowerPoint.")
+        if f.stat().st_size > MAX_DECK_MB << 20:
+            raise DeckError(f"The deck is over {MAX_DECK_MB} MB. Attach a smaller PDF export instead.")
+        course = find_course(deck["course_id"]) or {}
+        folder = SLIDES_DIR / safe_filename(course.get("code") or "Unsorted", "Unsorted")
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / safe_filename(f.name)
+        if dest.exists() and sha256_file(dest) != sha256_file(f):
+            dest = dest.with_name(f"{dest.stem} ({did}){dest.suffix}")
+        shutil.move(str(f), dest)
+        with db() as con:
+            con.execute("UPDATE decks SET path=? WHERE id=?", (dest.relative_to(DATA).as_posix(), did))
+        res = extract_deck(did, say)
+    except RetryLater:
+        raise
+    except Exception as e:
+        with db() as con:
+            con.execute("UPDATE decks SET status='error', error=? WHERE id=?", (user_error(e, "Getting the deck"), did))
+        raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    lids = set(match_decks(deck["course_id"])) if deck["course_id"] else set()
+    with db() as con:
+        lids |= {r[0] for r in con.execute("SELECT id FROM lectures WHERE deck_id=?", (did,))}
+    for lid in sorted(lids):
+        enqueue_slides(lid)
+    return {**res, "lectures": sorted(lids)}
+
+
+JOB_HANDLERS["slides"] = job_slides
+JOB_HANDLERS["deck_pull"] = job_deck_pull
+
+
+def record_decks(course_id: int, found: dict[str, dict]) -> int:
+    """Store decks a Canvas scan listed and queue a download for each new one."""
+    new = []
+    with db() as con:
+        for d in found.values():
+            cur = con.execute("INSERT OR IGNORE INTO decks(course_id, key, source, title, url, found_at, created_at) "
+                              "VALUES (?,?,?,?,?,?,?)", (course_id, d["key"], d["source"], d["title"], d["url"],
+                                                          d.get("found_at"), d.get("created_at")))
+            if cur.rowcount:
+                new.append((cur.lastrowid, d["title"]))
+    for did, title in new:
+        enqueue("deck_pull", {"deck_id": did, "title": title})
+    if new:
+        wake_workers()
+    return len(new)
+
+
+# --- what the UI reads
+def lecture_slides(lecture_id: int) -> dict:
+    """The lecture's slide state, its deck's pages with the time ranges each was on screen, and
+    the course's other decks to pick from."""
+    lec = get_lecture(lecture_id)
+    if not lec:
+        raise KeyError(lecture_id)
+    deck = get_deck(lec["deck_id"])
+    with db() as con:
+        job = con.execute("""SELECT status, progress FROM jobs WHERE status IN ('queued','running') AND
+                             ((kind='slides' AND lecture_id=?) OR (kind='deck_pull' AND json_extract(payload,'$.deck_id')=?))
+                             ORDER BY status='running' DESC, id LIMIT 1""", (lecture_id, lec["deck_id"] or -1)).fetchone()
+        slides = rows(con.execute("SELECT no, title, text FROM slides WHERE deck_id=? ORDER BY no",
+                                  (lec["deck_id"] or -1,)))
+        segs = rows(con.execute("SELECT start, end, slide_no FROM segments WHERE lecture_id=? AND slide_no IS NOT NULL "
+                                "ORDER BY idx", (lecture_id,)))
+        cands = rows(con.execute("""SELECT d.id, d.title, d.created_at, d.pages, d.source, d.status,
+                                    (SELECT l.id FROM lectures l WHERE l.deck_id=d.id AND l.id!=? ORDER BY l.id LIMIT 1) AS lid
+                                    FROM decks d WHERE (d.course_id IS ? AND d.source!='ocr') OR d.key=?""",
+                                 (lecture_id, lec["course_id"], f"ocr:{lecture_id}")))
+        lids = [c["lid"] for c in cands if c["lid"]]
+        titles = {r[0]: r[1] for r in con.execute(
+            f"SELECT id, title FROM lectures WHERE id IN ({','.join('?' * len(lids))})", lids)} if lids else {}
+    transcribed = lec["segment_count"] > 0
+    state = reason = progress = error = None
+    if lec["slides_error"] or (deck and deck["status"] == "error"):
+        state, error = "error", lec["slides_error"] or deck["error"]
+    elif job and job["status"] == "running":
+        state, progress = "aligning", job["progress"]
+    elif deck and lec["slides_aligned_at"]:
+        state = "aligned"
+    elif deck:
+        state = "waiting"
+        reason = ("downloading the slides" if deck["status"] == "new" else "no transcript yet" if not transcribed
+                  else "queued")
+    elif lec["deck_how"] == "manual":
+        state, reason = "none", "You chose no slides for this lecture."
+    elif lec["deck_how"] == "nothing":
+        state, reason = "none", "No deck matched, and the video has no readable slides."
+    elif lec["video_path"] and not job:
+        state = "waiting"
+        reason = "no transcript yet" if not transcribed else "not checked yet"
+    elif job:
+        state, reason = "waiting", "queued"
+    else:
+        state, reason = "none", "No deck matched this lecture yet. Attach a PDF or PowerPoint, or pick one below."
+    ranges: dict[int, list[list[float]]] = {}
+    for sg in segs:
+        rs = ranges.setdefault(sg["slide_no"], [])
+        if rs and sg["start"] - rs[-1][1] < 1.0:
+            rs[-1][1] = max(rs[-1][1], sg["end"])
+        else:
+            rs.append([sg["start"], sg["end"]])
+    v = int(deck["extracted_at"] or 0) if deck else 0
+    img = (lambda no, w: f"/media/slides/{deck['id']}/{no}-{w}.png?v={v}") if deck and deck["thumb_w"] \
+        else (lambda no, w: None)
+    return {
+        "state": state, "reason": reason, "progress": progress, "error": error,
+        "deck": deck and {"id": deck["id"], "title": deck["title"], "source": deck["source"],
+                          "how": lec["deck_how"], "score": lec["deck_score"], "pages": deck["pages"],
+                          "thumb_w": deck["thumb_w"], "thumb_h": deck["thumb_h"]},
+        "slides": [{"no": s["no"], "title": s["title"] or "", "text": s["text"],
+                    "first": ranges[s["no"]][0][0] if s["no"] in ranges else None,
+                    "ranges": [[round(a, 2), round(b, 2)] for a, b in ranges.get(s["no"], [])],
+                    "thumb": img(s["no"], THUMB_W), "image": img(s["no"], FULL_W)} for s in slides],
+        "candidates": sorted(({"id": c["id"], "title": c["title"], "pages": c["pages"], "source": c["source"],
+                               "status": c["status"],
+                               "score": None if c["source"] == "ocr" else match_score(c, lec),
+                               "matched_lecture": {"id": c["lid"], "title": titles.get(c["lid"])} if c["lid"] else None}
+                              for c in cands), key=lambda c: -(c["score"] if c["score"] is not None else -1)),
+    }
+
+
+def set_lecture_deck(lecture_id: int, deck_id: int | None) -> dict:
+    """Your pick: this deck (or none) for this lecture. It sticks through later re-matching."""
+    lec = get_lecture(lecture_id)
+    if not lec:
+        raise KeyError(lecture_id)
+    if deck_id is not None:
+        deck = get_deck(deck_id)
+        if not deck or (deck["course_id"] != lec["course_id"] and deck["key"] != f"ocr:{lecture_id}"
+                        and deck["source"] != "upload"):
+            raise ValueError("That deck isn't in this lecture's course.")
+    with db() as con:
+        con.execute("UPDATE lectures SET deck_id=?, deck_how='manual', deck_score=NULL, slides_aligned_at=NULL, "
+                    "slides_error=NULL WHERE id=?", (deck_id, lecture_id))
+        con.execute("UPDATE segments SET slide_no=NULL WHERE lecture_id=?", (lecture_id,))
+    if deck_id:
+        enqueue_slides(lecture_id)
+    if lec["course_id"]:  # a deck you placed here stops being auto-matched elsewhere
+        for other in match_decks(lec["course_id"]):
+            enqueue_slides(other)
+    return lecture_slides(lecture_id)
+
+
+def attach_deck_upload(lecture_id: int, filename: str, fileobj) -> dict:
+    """An uploaded PDF/PPTX for this lecture: stored under Slides/<Course>/, read right away (so a
+    bad file is reported to you, not to the job queue), then set as your pick."""
+    lec = get_lecture(lecture_id)
+    if not lec:
+        raise KeyError(lecture_id)
+    name = safe_filename(filename or "slides.pdf")
+    ext = Path(name).suffix.lower()
+    if ext not in SLIDE_EXTS:
+        raise HTTPException(400, f"Slides need to be a PDF or PowerPoint file, and this is "
+                                 f"{ext or 'a file without an extension'}. Export it as PDF and attach that.")
+    tmp = DATA / "uploads" / f"{uuid.uuid4().hex}{ext}"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        size, h = 0, hashlib.sha256()
+        with open(tmp, "wb") as out:
+            while chunk := fileobj.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_DECK_MB << 20:
+                    raise HTTPException(413, f"This file is over {MAX_DECK_MB} MB, too big for a slide deck. "
+                                             "Export a smaller PDF (without embedded video) and attach that.")
+                h.update(chunk)
+                out.write(chunk)
+        key = f"upload:{h.hexdigest()}"
+        with db() as con:
+            r = con.execute("SELECT id, status FROM decks WHERE course_id IS ? AND key=?", (lec["course_id"], key)).fetchone()
+        if r and r["status"] == "ready":
+            did = r["id"]
+        else:
+            folder = SLIDES_DIR / safe_filename(lec.get("course_code") or "Unsorted", "Unsorted")
+            folder.mkdir(parents=True, exist_ok=True)
+            dest = folder / name
+            if dest.exists():
+                dest = dest.with_name(f"{dest.stem} ({h.hexdigest()[:8]}){dest.suffix}")
+            shutil.move(str(tmp), dest)
+            rel = dest.relative_to(DATA).as_posix()
+            with db() as con:
+                if r:
+                    did = r["id"]
+                    con.execute("UPDATE decks SET path=?, status='new', error=NULL WHERE id=?", (rel, did))
+                else:
+                    did = con.execute("INSERT INTO decks(course_id, key, source, title, path, created_at) "
+                                      "VALUES (?,?,?,?,?,date('now'))",
+                                      (lec["course_id"], key, "upload", Path(name).stem, rel)).lastrowid
+            msg = None
+            try:
+                extract_deck(did)
+            except Exception as e:
+                if isinstance(e, DeckError):
+                    msg = str(e)
+                else:
+                    log.warning("upload for lecture %s: can't read %s: %r", lecture_id, name, e)
+                    msg = "This file couldn't be read. Export it as PDF and attach that."
+            if msg:  # out here, the failure's traceback (which can hold the file open) is gone
+                # nothing refers to a deck that never worked: drop it, so a retry starts clean
+                with db() as con:
+                    con.execute("DELETE FROM slides WHERE deck_id=?", (did,))
+                    con.execute("DELETE FROM decks WHERE id=? AND NOT EXISTS (SELECT 1 FROM lectures "
+                                "WHERE deck_id=?)", (did, did))
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError as e:
+                    log.warning("upload for lecture %s: can't remove %s: %s", lecture_id, dest, e)
+                shutil.rmtree(SLIDE_IMAGES / str(did), ignore_errors=True)
+                raise HTTPException(422, msg)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return set_lecture_deck(lecture_id, did)
+
+
+def lecture_slide_terms(lecture_id: int) -> str:
+    """For Whisper's prompt: slide titles and the deck's jargon (identifiers, acronyms, CamelCase,
+    words it repeats), so they get spelled the way the slides spell them."""
+    with db() as con:
+        r = con.execute("SELECT deck_id FROM lectures WHERE id=?", (lecture_id,)).fetchone()
+        slides = rows(con.execute("SELECT title, text FROM slides WHERE deck_id=? ORDER BY no", (r[0],))) \
+            if r and r[0] else []
+    if not slides:
+        return ""
+    counts: dict[str, int] = {}
+    for s in slides:
+        for w in re.findall(r"[A-Za-z][A-Za-z0-9_+#]{2,}", s["text"]):
+            counts[w] = counts.get(w, 0) + 1
+    jargon = [w for w, c in sorted(counts.items(), key=lambda kv: -kv[1])
+              if w.lower() not in _ALIGN_STOP and w.lower() not in _TITLE_STOP and
+              (re.search(r"[A-Z].*[A-Z]|[0-9_+#]|[a-z][A-Z]", w) or (c >= 2 and len(w) >= 6))][:40]
+    titles = list(dict.fromkeys(s["title"] for s in slides if s["title"]))[:12]
+    return "; ".join(titles) + (". " if titles else "") + ", ".join(jargon)
+
+
 def normalize_words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text.lower().replace("-", " "))
 
@@ -2518,6 +3624,10 @@ class AutoPull(BaseModel):
     auto_pull: bool
 
 
+class DeckPick(BaseModel):
+    deck_id: int | None = None
+
+
 class TranscribeIn(BaseModel):
     lecture_ids: list[int] | None = None
     mode: str = "auto"  # auto | colab | local
@@ -2553,6 +3663,9 @@ def start_background(watch_inboxes: bool = True) -> None:
         WORKERS["ingest"].start()
         WORKERS["canvas"] = Worker(["canvas_scan", "canvas_pull"], "canvas-worker")
         WORKERS["canvas"].start()
+        # Its own worker: a semester of queued recording pulls shouldn't hold up the slides.
+        WORKERS["slides"] = Worker(["deck_pull", "slides"], "slides-worker")
+        WORKERS["slides"].start()
     if watch_inboxes and "inbox" not in WORKERS:
         WORKERS["inbox"] = InboxWatcher(interval=float(os.environ.get("LECTURELAB_INBOX_INTERVAL", 30)),
                                         on_new=wake_workers)
@@ -2797,6 +3910,53 @@ def create_app():
         for sg in segs:
             sg["words"] = json.loads(sg["words"]) if sg["words"] else []
         return segs
+
+    # --- slides
+    @app.get("/api/lectures/{lecture_id}/slides")
+    def api_slides(lecture_id: int):
+        try:
+            return lecture_slides(lecture_id)
+        except KeyError:
+            raise HTTPException(404, "lecture not found")
+
+    @app.put("/api/lectures/{lecture_id}/slides")
+    def api_set_slides(lecture_id: int, body: DeckPick):
+        try:
+            return set_lecture_deck(lecture_id, body.deck_id)
+        except KeyError:
+            raise HTTPException(404, "lecture not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/lectures/{lecture_id}/slides")
+    def api_upload_slides(lecture_id: int, file: UploadFile = File(...)):
+        try:
+            return attach_deck_upload(lecture_id, file.filename, file.file)
+        except KeyError:
+            raise HTTPException(404, "lecture not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/lectures/{lecture_id}/slides/align")
+    def api_align_slides(lecture_id: int):
+        lec = get_lecture(lecture_id)
+        if not lec:
+            raise HTTPException(404, "lecture not found")
+        with db() as con:
+            con.execute("UPDATE lectures SET slides_error=NULL WHERE id=?", (lecture_id,))
+            failed = [r[0] for r in con.execute("SELECT id FROM decks WHERE status='error' AND (id=? OR course_id IS ?)",
+                                                (lec["deck_id"] or -1, lec["course_id"]))]
+        for did in failed:  # decks that failed to download get fetched again (a bad file just fails again)
+            retry_deck(did)
+        enqueue_slides(lecture_id)
+        return lecture_slides(lecture_id)
+
+    @app.get("/media/slides/{deck_id}/{name}")
+    def api_slide_image(deck_id: int, name: str):
+        path = SLIDE_IMAGES / str(deck_id) / name
+        if not re.fullmatch(rf"\d+-(?:{THUMB_W}|{FULL_W})\.png", name) or not path.is_file():
+            raise HTTPException(404, "no such slide image")
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/inboxes")
     def api_inboxes():

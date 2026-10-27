@@ -700,3 +700,545 @@ def test_canvas_pull_jobs_are_labelled_with_the_recording_title(ll):
     client = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
     jobs = client.get("/api/jobs").json()
     assert [j["label"] for j in jobs if j["kind"] == "canvas_pull"] == ["M2L1 Lexer Introduction"]
+
+
+# ---------------------------------------------------------------- slides (Stage 3)
+SLIDE_TEXT = [
+    "Course overview: grading policy, office hours, exams and the syllabus schedule",
+    "Lexical analysis: a lexer turns characters into tokens using regular expressions",
+    "Finite automata: a DFA has states, an alphabet, transitions and accepting states",
+    "Parsing: a recursive descent parser builds a syntax tree from the token stream",
+    "Type checking: the checker walks the syntax tree and rejects ill typed programs",
+    "Interpreters: evaluate the syntax tree directly with an environment of bindings",
+    "Garbage collection: mark and sweep frees heap objects that are unreachable",
+]
+
+
+def _pdf(path, pages, sizes=None):
+    import pymupdf as fitz
+    doc = fitz.open()
+    for i, text in enumerate(pages):
+        w, h = (sizes or {}).get(i, (960, 540))
+        p = doc.new_page(width=w, height=h)
+        p.insert_text((40, 80), text.split(":")[0], fontsize=32)
+        p.insert_textbox(fitz.Rect(40, 120, w - 40, h - 40), text, fontsize=16)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(path)
+    return path
+
+
+def _deck(ll, title, course_id, path=None, source="drive", status="new", created_at=None):
+    with ll.db() as con:
+        return con.execute("INSERT INTO decks(course_id, key, source, title, path, status, created_at) "
+                           "VALUES (?,?,?,?,?,?,?)", (course_id, f"{source}:{title}", source, title, path, status,
+                                                      created_at)).lastrowid
+
+
+def _ready_deck(ll, title, course_id, pages=SLIDE_TEXT):
+    rel = f"Slides/test/{title}.pdf"
+    _pdf(ll.DATA / rel, pages)
+    did = _deck(ll, title, course_id, path=rel)
+    ll.extract_deck(did)
+    return did
+
+
+def _lec(ll, title, course_id, segs=(), video=None, date=None):
+    with ll.db() as con:
+        lid = con.execute("INSERT INTO lectures(title, course_id, date, status, duration_sec, video_path) "
+                          "VALUES (?,?,?,'transcribed',600,?)", (title, course_id, date, video)).lastrowid
+        con.executemany("INSERT INTO segments(lecture_id, idx, start, end, text) VALUES (?,?,?,?,?)",
+                        [(lid, i, s, e, t) for i, (s, e, t) in enumerate(segs)])
+    return lid
+
+
+def _said(slide_order, seg_sec=15):
+    """Two 15 s segments per 30 s window, each window talking about one slide."""
+    segs = []
+    for w, s in enumerate(slide_order):
+        body = SLIDE_TEXT[s].split(":")[1] if s is not None else "okay so yeah let me just grab some water"
+        for half in range(2):
+            t = (2 * w + half) * seg_sec
+            segs.append((t, t + seg_sec, f"so um{body} right"))
+    return segs
+
+
+def test_match_score_reads_codes_titles_and_dates(ll):
+    s = lambda d, l, **kw: ll.match_score({"title": d, **kw}, {"title": l, "date": kw.get("date")})  # noqa: E731
+    assert s("M2L1 Lexer Introduction", "M2L1 Lexer Introduction") >= 1.0
+    assert s("L07 slides", "Lecture 7: Parsing") >= ll.MATCH_MIN          # same code, nothing else
+    assert s("Regular Languages", "M2L2 Regular Languages") >= ll.MATCH_MIN  # same title, one side has a code
+    assert s("Lecture 8 Parsing", "Lecture 7: Parsing") < 0                # codes contradict
+    assert s("Syllabus", "M2L1 Lexer Introduction") < ll.MATCH_MIN
+    assert s("M2TL1 Error Handling", "M2TL1 Error Handling") >= 1.0
+    assert s("M2L1 Error Handling", "M2TL1 Error Handling") < 0  # TL is a different lecture from L
+    assert s("M3TL2-3 Syntax Review", "M3TL3 Syntax Review (cont)") >= ll.MATCH_MIN  # a range covers it
+    near =ll.match_score({"title": "Week notes", "created_at": "2026-09-01T10:00:00Z"},
+                          {"title": "Notes", "date": "2026-09-02"})
+    far = ll.match_score({"title": "Week notes", "created_at": "2026-06-01T10:00:00Z"},
+                         {"title": "Notes", "date": "2026-09-02"})
+    assert near > far
+
+
+def test_match_decks_is_one_to_one_skips_ties_and_respects_your_pick(ll):
+    cid = ll.find_course("COP4020")["id"]
+    a, b = _lec(ll, "M0L1 Course Overview", cid), _lec(ll, "M2L1 Lexer Introduction", cid)
+    c, d = _lec(ll, "Review session", cid), _lec(ll, "Review session", cid)
+    d1, d2 = _deck(ll, "M0L1 Course Overview", cid), _deck(ll, "M2L1 Lexer Introduction", cid)
+    d3 = _deck(ll, "Review session", cid)
+    assert sorted(ll.match_decks(cid)) == [a, b]
+    deck_of = lambda lid: ll.get_lecture(lid)["deck_id"]  # noqa: E731
+    assert (deck_of(a), deck_of(b), deck_of(c), deck_of(d)) == (d1, d2, None, None)  # c/d tie: you pick
+    assert ll.match_decks(cid) == []  # stable
+    ll.set_lecture_deck(b, d1)  # you say deck 1 belongs to lecture b
+    assert ll.get_lecture(b)["deck_how"] == "manual"
+    assert deck_of(a) is None  # deck 1 is no longer auto-assigned to a
+    ll.match_decks(cid)
+    assert (deck_of(a), deck_of(b)) == (None, d1)
+    ll.set_lecture_deck(c, d3)
+    assert deck_of(d) is None and ll.lecture_slides(c)["deck"]["how"] == "manual"
+    # one deck for two lectures when its name says so, but still only one per code
+    e, f = _lec(ll, "M3TL2 Syntax Review", cid), _lec(ll, "M3TL3 Syntax Review (cont)", cid)
+    g = _lec(ll, "M3TL4 Syntax Review again", cid)
+    both = _deck(ll, "M3TL2-3 Syntax Review", cid)
+    ll.match_decks(cid)
+    assert (deck_of(e), deck_of(f), deck_of(g)) == (both, both, None)
+
+
+def test_align_follows_skips_one_step_back_and_quiet_stretches(ll):
+    truth = [0, 0, 1, 1, 2, 2, 3, 2, 3, 4, 4, 6, 6]  # skips slide 5, goes back from 3 to 2 once
+    wins = [SLIDE_TEXT[s].split(":")[1] + " um so basically" for s in truth]
+    wins.insert(5, "okay so yeah let me just grab some water")  # nothing slide-related said
+    expect = truth[:5] + [truth[4]] + truth[5:]
+    assert ll.align_windows(ll.tfidf_sim(wins, SLIDE_TEXT)) == expect
+
+
+def test_align_gives_up_when_no_slide_text_matches(ll):
+    import numpy as np
+    assert ll.align_windows(np.zeros((4, 3))) is None
+    cid = ll.find_course("COP4020")["id"]
+    did = _ready_deck(ll, "Unrelated", cid, pages=["Medieval poetry: sonnets, ballads and heroic couplets"] * 2)
+    lid = _lec(ll, "Lexers", cid, segs=_said([1, 2, 3]))
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET deck_id=?, deck_how='manual' WHERE id=?", (did, lid))
+    with pytest.raises(ll.DeckError, match="right deck"):
+        ll.align_lecture(lid)
+
+
+def test_pdf_pages_get_text_titles_and_same_size_renders(ll):
+    import pymupdf as fitz
+    cid = ll.find_course("COP4020")["id"]
+    rel = "Slides/COP4020/mixed.pdf"
+    _pdf(ll.DATA / rel, SLIDE_TEXT[:3], sizes={1: (540, 960)})  # page 2 is portrait
+    did = _deck(ll, "mixed", cid, path=rel)
+    assert ll.extract_deck(did) == {"pages": 3}
+    deck = ll.get_deck(did)
+    assert (deck["status"], deck["pages"], deck["thumb_w"], deck["thumb_h"]) == ("ready", 3, 320, 180)
+    with ll.db() as con:
+        titles = [r[0] for r in con.execute("SELECT title FROM slides WHERE deck_id=? ORDER BY no", (did,))]
+    assert titles == ["Course overview", "Lexical analysis", "Finite automata"]
+    for no in (1, 2, 3):
+        for w, h in ((320, 180), (1280, 720)):
+            pix = fitz.Pixmap(str(ll.SLIDE_IMAGES / str(did) / f"{no}-{w}.png"))
+            assert (pix.width, pix.height) == (w, h), (no, w)
+
+
+def _pptx(path, slides):
+    from pptx import Presentation
+    prs = Presentation()
+    for title, body in slides:
+        s = prs.slides.add_slide(prs.slide_layouts[1])
+        s.shapes.title.text = title
+        s.placeholders[1].text = body
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prs.save(path)
+    return path
+
+
+def test_pptx_is_converted_with_libreoffice(ll):
+    cid = ll.find_course("COP4020")["id"]
+    _pptx(ll.DATA / "Slides/COP4020/deck.pptx", [("Lexers", "Tokens come from regular expressions"),
+                                                 ("Parsers", "Recursive descent builds the tree")])
+    did = _deck(ll, "deck", cid, path="Slides/COP4020/deck.pptx")
+    assert ll.extract_deck(did) == {"pages": 2}
+    assert ll.get_deck(did)["thumb_w"] == 320
+    assert (ll.SLIDE_IMAGES / str(did) / "2-1280.png").is_file()
+
+
+def test_pptx_falls_back_to_text_and_ppt_reports_how_to_fix(ll, monkeypatch):
+    cid = ll.find_course("COP4020")["id"]
+    monkeypatch.setattr(ll, "pptx_to_pdf", lambda src, out: (_ for _ in ()).throw(RuntimeError("soffice died")))
+    _pptx(ll.DATA / "Slides/COP4020/deck.pptx", [("Lexers", "Tokens come from regular expressions")])
+    did = _deck(ll, "deck", cid, path="Slides/COP4020/deck.pptx")
+    ll.extract_deck(did)
+    assert ll.get_deck(did)["thumb_w"] is None
+    with ll.db() as con:
+        assert con.execute("SELECT title, text FROM slides WHERE deck_id=?", (did,)).fetchone()[:] == (
+            "Lexers", "Lexers\nTokens come from regular expressions")
+    (ll.DATA / "Slides/COP4020/old.ppt").write_bytes(b"x")
+    old = _deck(ll, "old", cid, path="Slides/COP4020/old.ppt")
+    with pytest.raises(ll.DeckError, match="Save it as PDF"):
+        ll.extract_deck(old)
+
+
+def test_find_screens_drops_transients_and_folds_revisits(ll):
+    import numpy as np
+    a = np.full((90, 160), 250, np.uint8)
+    b, c = a.copy(), a.copy()
+    b[10:20] = 0                   # a different screen
+    c[40:42, 20:120] = 30          # one new line of text: 1.4% of the picture
+    frames = np.stack([a, a, a, b, c, c, c, a, a])
+    frames[:, 70:90, 130:160] = np.random.default_rng(1).integers(0, 255, (9, 20, 30))  # a webcam inset
+    ts = [0, 4, 8, 12, 16, 20, 24, 28, 32]
+    screens = ll.find_screens(frames, ts, end=36)
+    assert [s["times"] for s in screens] == [[[0, 12], [28, 36]], [[16, 28]]]  # b was on for 4 s
+    assert [s["grab"] for s in screens] == [2, 6]  # the last frame of the first run
+    assert ll.find_screens(frames[:1], ts[:1], end=10)[0]["times"] == [[0, 10]]
+
+
+def test_slides_job_aligns_and_the_api_shows_revisits(ll):
+    cid = ll.find_course("COP4020")["id"]
+    did = _ready_deck(ll, "M2L1 Lexer Introduction", cid)
+    lid = _lec(ll, "M2L1 Lexer Introduction", cid, segs=_said([0, 1, 1, 2, 1, 2, 3]))
+    out = ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    assert out["segments"] == 14
+    with ll.db() as con:
+        nos = [r[0] for r in con.execute("SELECT slide_no FROM segments WHERE lecture_id=? ORDER BY idx", (lid,))]
+    assert nos == [n + 1 for n in (0, 0, 1, 1, 1, 1, 2, 2, 1, 1, 2, 2, 3, 3)]
+    s = ll.lecture_slides(lid)
+    assert (s["state"], s["deck"]["id"], s["deck"]["how"], s["deck"]["thumb_h"]) == ("aligned", did, "auto", 180)
+    by_no = {x["no"]: x for x in s["slides"]}
+    assert by_no[2]["ranges"] == [[30.0, 90.0], [120.0, 150.0]] and by_no[2]["first"] == 30.0
+    assert by_no[7]["ranges"] == [] and by_no[7]["first"] is None  # never shown
+    assert by_no[1]["thumb"] == f"/media/slides/{did}/1-320.png?v={int(ll.get_deck(did)['extracted_at'])}"
+    assert s["candidates"][0]["id"] == did and s["candidates"][0]["pages"] == 7
+    assert "Lexical analysis" in ll.lecture_slide_terms(lid)
+    assert "Slides: " in ll.initial_prompt(ll.get_lecture(lid))
+
+
+def test_slides_states_say_what_is_missing(ll):
+    cid = ll.find_course("COP4020")["id"]
+    state = lambda lid: (lambda s: (s["state"], s["reason"] or s["error"]))(ll.lecture_slides(lid))  # noqa: E731
+    bare = _lec(ll, "Office hours", cid)
+    assert state(bare)[0] == "none"
+    video = _lec(ll, "Talk", cid, video="media/x/original.mp4")
+    with ll.db() as con:
+        con.execute("DELETE FROM segments WHERE lecture_id=?", (video,))
+    assert state(video) == ("waiting", "no transcript yet")
+    pending = _lec(ll, "M2L1 Lexer Introduction", cid, segs=_said([1]))
+    _deck(ll, "M2L1 Lexer Introduction", cid)  # listed on Canvas, not downloaded yet
+    ll.match_decks(cid)
+    assert state(pending) == ("waiting", "downloading the slides")
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET slides_error='The deck has no pages. Attach the deck again.' WHERE id=?",
+                    (pending,))
+    assert state(pending) == ("error", "The deck has no pages. Attach the deck again.")
+    ll.set_lecture_deck(bare, None)
+    assert state(bare) == ("none", "You chose no slides for this lecture.")
+
+
+def test_api_slide_upload_errors_pick_and_images(ll, monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "Parsing day", cid, segs=_said([3, 3, 4]))
+    url = f"/api/lectures/{lid}/slides"
+    r = c.post(url, files={"file": ("notes.docx", b"x")})
+    assert r.status_code == 400 and "PDF" in r.json()["detail"]
+    r = c.post(url, files={"file": ("broken.pdf", b"this is not a pdf")})
+    assert r.status_code == 422 and "attach" in r.json()["detail"].lower()
+    good = _pdf(tmp_path / "Parsing.pdf", SLIDE_TEXT).read_bytes()
+    monkeypatch.setattr(ll, "MAX_DECK_MB", 0)
+    assert c.post(url, files={"file": ("big.pdf", good)}).status_code == 413
+    monkeypatch.setattr(ll, "MAX_DECK_MB", 200)
+    r = c.post(url, files={"file": ("..\\CON.pdf", good)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["deck"]["source"], body["deck"]["how"], body["deck"]["pages"]) == ("upload", "manual", 7)
+    assert body["state"] == "waiting"  # queued for alignment
+    assert (ll.DATA / "Slides" / "COP4020" / "_CON.pdf").is_file()  # no device name, no path parts
+    did = body["deck"]["id"]
+    img = c.get(f"/media/slides/{did}/1-320.png")
+    assert img.status_code == 200 and img.headers["cache-control"] == "no-cache"
+    assert c.get(f"/media/slides/{did}/..%5C..%5Clecturelab.db").status_code == 404
+    _deck(ll, "Parsing day", cid, status="ready")  # a better-looking auto match appears
+    ll.match_decks(cid)
+    assert c.get(url).json()["deck"]["id"] == did  # your pick stays
+    with ll.db() as con:
+        jobs = con.execute("SELECT COUNT(*) FROM jobs WHERE kind='slides' AND lecture_id=? AND status='queued'",
+                           (lid,)).fetchone()[0]
+    assert jobs == 1  # queued once, not once per change
+    r = c.put(url, json={"deck_id": None})
+    assert r.json()["state"] == "none"
+    assert c.put(url, json={"deck_id": 999}).status_code == 400
+
+
+def test_canvas_scan_lists_decks_separately_and_queues_downloads(ll, monkeypatch):
+    folder = "https://drive.google.com/drive/folders/1FakeCourseFolder0000000000000000"
+    files = {"video": [], "pdf": [{"id": 77, "display_name": "Lecture 7 Parsing.pdf", "content-type": "application/pdf",
+                                   "size": 1 << 20, "created_at": "2026-09-01T12:00:00Z"},
+                                  {"id": 78, "display_name": "Huge scan.pdf", "content-type": "application/pdf",
+                                   "size": 900 << 20}]}
+
+    def fake_get(path, params=None, paginate=True):
+        if path.endswith("/files"):
+            return files["pdf"] if "application/pdf" in params["content_types[]"] else files["video"]
+        if path.endswith("/modules"):
+            return [{"name": "Resources", "items": [{"type": "ExternalUrl", "title": "Drive", "external_url": folder}]}]
+        return [] if paginate else None
+
+    monkeypatch.setattr(ll, "canvas_get", fake_get)
+    monkeypatch.setattr(ll, "CanvasSession", lambda *a, **k: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(ll, "drive_list_folder", lambda fid: [
+        {"id": "1FakeRecording00000000000000000-", "path": "M0L1 Course Overview.mkv"},
+        {"id": "1FakeSlides000000000000000000000", "path": "M0L1 Course Overview.pdf"}])
+    ll.set_canvas_state("connected", user="Kashi")
+    c = ll.find_course("COP4020")
+    c["canvas_id"] = 11
+    out = ll.canvas_scan_course(c)
+    assert (out["new"], out["decks"], out["decks_new"]) == (1, 2, 2)  # the 900 MB scan is skipped
+    with ll.db() as con:
+        decks = {r[0]: r[1:] for r in con.execute("SELECT key, source, title, status FROM decks")}
+        items = [r[0] for r in con.execute("SELECT key FROM canvas_items")]
+        pulls = con.execute("SELECT COUNT(*) FROM jobs WHERE kind='deck_pull'").fetchone()[0]
+    assert decks == {"canvas-file:77": ("canvas", "Lecture 7 Parsing", "new"),
+                     "drive:1FakeSlides000000000000000000000": ("drive", "M0L1 Course Overview", "new")}
+    assert items == ["drive:1FakeRecording00000000000000000-"]  # the Canvas tab only lists recordings
+    assert pulls == 2
+    assert ll.canvas_scan_course(c)["decks_new"] == 0  # a rescan doesn't queue them again
+
+
+def test_deck_download_reads_it_and_queues_the_matching_lecture(ll, monkeypatch, tmp_path):
+    import gdown
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "M0L1 Course Overview", cid, segs=_said([0, 0, 1]))
+    did = _deck(ll, "M0L1 Course Overview", cid)
+    src = _pdf(tmp_path / "src.pdf", SLIDE_TEXT[:3])
+
+    def fake_download(id, output, quiet):
+        dest = __import__("pathlib").Path(output) / "M0L1 Course Overview.pdf"
+        dest.write_bytes(src.read_bytes())
+        return str(dest)
+
+    monkeypatch.setattr(gdown, "download", fake_download)
+    with ll.db() as con:
+        con.execute("UPDATE decks SET key='drive:1FakeSlides000000000000000000000' WHERE id=?", (did,))
+    out = ll.job_deck_pull({"id": 5, "payload": {"deck_id": did}})
+    assert out == {"pages": 3, "lectures": [lid]}
+    assert ll.get_deck(did)["path"] == "Slides/COP4020/M0L1 Course Overview.pdf"
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    assert ll.lecture_slides(lid)["state"] == "aligned"
+
+
+def test_slides_read_off_a_video_with_revisits(ll, tmp_path):
+    import pymupdf as fitz
+    pdf = fitz.open(_pdf(tmp_path / "s.pdf", SLIDE_TEXT[1:3]))
+    imgs = []
+    for i, page in enumerate(pdf):
+        imgs.append(tmp_path / f"{i}.png")
+        ll.render_fixed(page, 1280, 720).save(imgs[-1])
+    video = ll.DATA / "media" / "v" / "original.mp4"
+    video.parent.mkdir(parents=True)
+    seq = [imgs[0], imgs[1], imgs[0]]  # slide A, slide B, back to A: 20 s each
+    args = [ll.find_tool("ffmpeg"), "-v", "error"]
+    for im in seq:
+        args += ["-loop", "1", "-t", "20", "-framerate", "5", "-i", str(im)]
+    args += ["-filter_complex", "".join(f"[{i}:v]" for i in range(len(seq))) + f"concat=n={len(seq)}:v=1[v]",
+             "-map", "[v]", "-c:v", "libx264", "-g", "10", "-pix_fmt", "yuv420p", str(video)]
+    subprocess.run(args, check=True)
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "Board day", cid, video="media/v/original.mp4",
+               segs=[(t, t + 10, "talking") for t in range(0, 60, 10)])
+    out = ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    s = ll.lecture_slides(lid)
+    assert out["pages"] == 2 and s["deck"]["source"] == "ocr" and s["deck"]["thumb_h"] == 180
+    assert "lexer" in s["slides"][0]["text"].lower() and "dfa" in s["slides"][1]["text"].lower()
+    assert [len(x["ranges"]) for x in s["slides"]] == [2, 1]  # A came back
+    with ll.db() as con:
+        nos = [r[0] for r in con.execute("SELECT slide_no FROM segments WHERE lecture_id=? ORDER BY idx", (lid,))]
+    assert nos == [1, 1, 2, 2, 1, 1]
+    did = s["deck"]["id"]
+    ll.delete_lecture(lid)
+    assert ll.get_deck(did) is None and not (ll.SLIDE_IMAGES / str(did)).exists()
+
+
+def _slide_video(ll, tmp_path, shots):
+    """An h264 video of (png or None for a dark 'IDE' screen, seconds) shots, keyframe every 2 s."""
+    args = [ll.find_tool("ffmpeg"), "-v", "error"]
+    for img, sec in shots:
+        args += (["-loop", "1", "-t", str(sec), "-framerate", "5", "-i", str(img)] if img else
+                 ["-f", "lavfi", "-t", str(sec), "-i", "color=c=0x1e1f22:s=1280x720:r=5"])
+    video = ll.DATA / "media" / "vv" / "original.mp4"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    args += ["-filter_complex", "".join(f"[{i}:v]setsar=1[v{i}];" for i in range(len(shots))) +
+             "".join(f"[v{i}]" for i in range(len(shots))) + f"concat=n={len(shots)}:v=1[v]",
+             "-map", "[v]", "-c:v", "libx264", "-g", "10", "-pix_fmt", "yuv420p", str(video)]
+    subprocess.run(args, check=True)
+    return "media/vv/original.mp4"
+
+
+def test_video_that_shows_the_slides_places_them_and_marks_demos(ll, tmp_path):
+    import pymupdf as fitz
+    cid = ll.find_course("COP4020")["id"]
+    did = _ready_deck(ll, "M3L1 Parser Introduction", cid, pages=SLIDE_TEXT[1:4])
+    pdf = fitz.open(ll.DATA / ll.get_deck(did)["path"])
+    imgs = []
+    for i, page in enumerate(pdf):
+        imgs.append(tmp_path / f"p{i}.png")
+        ll.render_fixed(page, 1280, 720).save(imgs[-1])
+    video = _slide_video(ll, tmp_path, [(imgs[0], 20), (None, 40), (imgs[1], 20), (imgs[2], 20)])
+    # nothing said matches any slide: only the video can place them
+    lid = _lec(ll, "M3L1 Parser Introduction", cid, video=video,
+               segs=[(t, t + 10, "okay so yeah") for t in range(0, 100, 10)])
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    with ll.db() as con:
+        nos = [r[0] for r in con.execute("SELECT slide_no FROM segments WHERE lecture_id=? ORDER BY idx", (lid,))]
+    assert nos == [1, 1, 1, None, None, None, 2, 2, 2, 3]
+    s = ll.lecture_slides(lid)
+    assert s["state"] == "aligned" and [x["ranges"] for x in s["slides"]] == [[[0, 30]], [[60, 90]], [[90, 100]]]
+
+
+def test_deck_download_that_fails_for_a_passing_reason_waits_and_retries(ll, monkeypatch):
+    import gdown
+    cid = ll.find_course("COP4020")["id"]
+    did = _deck(ll, "M0L1 Course Overview", cid)
+    with ll.db() as con:
+        con.execute("UPDATE decks SET key='drive:1FakeSlides000000000000000000000' WHERE id=?", (did,))
+
+    def boom(**kw):
+        raise ConnectionError(rf"{ll.DATA}\downloads\job1 unreachable")
+
+    monkeypatch.setattr(gdown, "download", boom)
+    jid = ll.enqueue("deck_pull", {"deck_id": did, "title": "M0L1"})
+    for n in range(ll.DECK_MAX_TRIES - 1):  # five tries in all
+        with pytest.raises(ll.RetryLater):
+            ll.job_deck_pull(ll.get_job(jid))
+        j = ll.get_job(jid)
+        assert (j["status"], j["payload"]["tries"], ll.get_deck(did)["status"]) == ("queued", n + 1, "new")
+        assert j["retry_at"]
+    with pytest.raises(ll.DeckError):
+        ll.job_deck_pull(ll.get_job(jid))
+    deck = ll.get_deck(did)
+    assert deck["status"] == "error" and str(ll.DATA) not in deck["error"] and "attach it" in deck["error"]
+    assert ll.retry_deck(did) and ll.get_deck(did)["status"] == "new"  # "look for slides" asks again
+    # signed out of Canvas: it waits for you, however long, without using up its tries
+    cdid = _deck(ll, "M2L1 Lexer Introduction", cid, source="canvas")
+    with ll.db() as con:
+        con.execute("UPDATE decks SET url='canvas_file:7' WHERE id=?", (cdid,))
+    cj = ll.enqueue("deck_pull", {"deck_id": cdid, "title": "M2L1"})
+    for _ in range(ll.DECK_MAX_TRIES + 2):
+        with pytest.raises(ll.RetryLater):
+            ll.job_deck_pull(ll.get_job(cj))
+    assert ll.get_job(cj)["payload"]["tries"] == 0 and ll.get_deck(cdid)["status"] == "new"
+    assert ll.get_job(cj)["progress"] == "waiting for Canvas sign-in" and ll.get_job(cj)["retry_at"]
+    ll.set_canvas_state("connected", user="test")  # you sign in: it goes now, not in half an hour
+    assert ll.get_job(cj)["retry_at"] is None
+
+
+def test_cli_slides_does_not_hang_on_a_download_that_waits(ll, monkeypatch, capsys):
+    import gdown
+    sys.path.insert(0, str(ll.ROOT))
+    import cli
+    monkeypatch.setattr(cli, "ll", ll)
+    monkeypatch.setattr(gdown, "download", lambda **kw: None)  # Drive returns nothing: a passing failure
+    cid = ll.find_course("COP4020")["id"]
+    did = _deck(ll, "M0L1 Course Overview", cid)
+    jid = ll.enqueue("deck_pull", {"deck_id": did, "title": "M0L1"})
+    assert cli.cmd_slides(type("A", (), {"ids": []})()) == 0
+    assert "next try after" in capsys.readouterr().out
+    assert ll.get_job(jid)["status"] == "queued"
+
+
+def test_a_second_copy_of_a_deck_keeps_the_match_and_its_alignment(ll):
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "M2L1 Lexer Introduction", cid, segs=_said([1, 1, 2]))
+    pdf = _ready_deck(ll, "M2L1 Lexer Introduction", cid)
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    assert ll.lecture_slides(lid)["state"] == "aligned"
+    _deck(ll, "M2L1 Lexer Introduction", cid, source="canvas")  # the PPTX of it, posted on Canvas too
+    assert ll.match_decks(cid) == []
+    assert ll.get_lecture(lid)["deck_id"] == pdf and ll.lecture_slides(lid)["state"] == "aligned"
+    # a new lecture whose deck was posted twice still gets one: the PDF
+    l2 = _lec(ll, "M2L2 Regular Languages", cid)
+    _deck(ll, "M2L2 Regular Languages", cid, source="canvas", path="Slides/x/M2L2 Regular Languages.pptx")
+    b = _deck(ll, "M2L2 Regular Languages", cid, path="Slides/x/M2L2 Regular Languages.pdf")
+    assert ll.match_decks(cid) == [l2] and ll.get_lecture(l2)["deck_id"] == b
+    # a range deck you picked for one lecture still serves the other one in its range
+    e, f = _lec(ll, "M3TL2 Syntax Review", cid), _lec(ll, "M3TL3 Syntax Review (cont)", cid)
+    both = _deck(ll, "M3TL2-3 Syntax Review", cid)
+    ll.set_lecture_deck(e, both)
+    assert ll.get_lecture(f)["deck_id"] == both
+
+
+def test_a_pick_made_while_the_video_is_read_wins(ll, monkeypatch):
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "Guest talk", cid, segs=_said([1, 2]), video="media/x/original.mp4")
+    did = _ready_deck(ll, "Some deck", cid)
+    other = _deck(ll, "Video frames", cid, source="ocr", status="ready")
+
+    def slow_ocr(lec, progress=None):
+        ll.set_lecture_deck(lid, did)  # you attach a deck while the video is being read
+        return other
+
+    monkeypatch.setattr(ll, "ocr_video_deck", slow_ocr)
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    lec = ll.get_lecture(lid)
+    assert (lec["deck_id"], lec["deck_how"]) == (did, "manual")
+
+
+def test_a_new_transcript_is_not_shown_as_aligned(ll):
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "M2L1 Lexer Introduction", cid, segs=_said([1, 2]))
+    _ready_deck(ll, "M2L1 Lexer Introduction", cid)
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    assert ll.lecture_slides(lid)["state"] == "aligned"
+    ll.store_transcript(lid, {"segments": [{"start": 0, "end": 10, "text": "a lexer makes tokens"}]}, "local")
+    s = ll.lecture_slides(lid)
+    assert s["state"] == "waiting" and all(x["first"] is None for x in s["slides"])
+
+
+def test_big_and_scanned_pdfs_are_bounded(ll, monkeypatch, tmp_path):
+    import pymupdf as fitz
+    cid = ll.find_course("COP4020")["id"]
+    rel = "Slides/test/book.pdf"
+    _pdf(ll.DATA / rel, SLIDE_TEXT[:4])
+    monkeypatch.setattr(ll, "MAX_DECK_PAGES", 3)
+    with pytest.raises(ll.DeckError, match="4 pages"):
+        ll.extract_deck(_deck(ll, "Textbook", cid, path=rel))
+    # scans: two near-empty pages, and a page-sized picture with a footer; OCR stops at the cap
+    pic = tmp_path / "pic.png"
+    ll.render_fixed(fitz.open(_pdf(tmp_path / "p.pdf", SLIDE_TEXT[1:2]))[0], 960, 540).save(pic)
+    doc = fitz.open()
+    for _ in range(2):
+        doc.new_page(width=960, height=540).insert_text((40, 80), "x")
+    p = doc.new_page(width=960, height=540)
+    p.insert_image(p.rect, filename=str(pic))
+    p.insert_text((40, 530), "COP4020 Programming Language Concepts", fontsize=10)
+    rel = "Slides/test/scan.pdf"
+    doc.save(ll.DATA / rel)
+    seen = []
+    monkeypatch.setattr(ll, "ocr_image", lambda path: seen.append(path.name) or "read off the picture, lexer tokens")
+    monkeypatch.setattr(ll, "OCR_MAX_PAGES", 2)
+    did = _deck(ll, "Scanned", cid, path=rel)
+    ll.extract_deck(did)
+    assert seen == ["1-1280.png", "2-1280.png"]
+    monkeypatch.setattr(ll, "OCR_MAX_PAGES", 5)
+    seen.clear()
+    ll.extract_deck(did)
+    assert seen == ["1-1280.png", "2-1280.png", "3-1280.png"]  # the footer alone doesn't count as text
+    with ll.db() as con:
+        assert con.execute("SELECT text FROM slides WHERE deck_id=? AND no=3", (did,)).fetchone()[0].startswith("read")
+
+
+def test_slide_errors_shown_to_you_carry_no_local_paths(ll, monkeypatch):
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "M2L1 Lexer Introduction", cid, segs=_said([1, 2]))
+    _ready_deck(ll, "M2L1 Lexer Introduction", cid)
+
+    def broken(lecture_id):
+        raise RuntimeError(rf"ffmpeg.exe failed (1): {ll.DATA}\media\5\original.mp4: Invalid data")
+
+    monkeypatch.setattr(ll, "align_lecture", broken)
+    with pytest.raises(RuntimeError):
+        ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    s = ll.lecture_slides(lid)
+    assert s["state"] == "error" and str(ll.DATA) not in s["error"] and "server.log" in s["error"]

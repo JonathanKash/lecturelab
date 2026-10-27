@@ -153,6 +153,37 @@ def cmd_transcribe(args) -> int:
     return 0
 
 
+def cmd_slides(args) -> int:
+    """Download queued decks, then find, read and align slides for lectures (default: every
+    transcribed lecture that isn't aligned yet). Runs here, not in the server."""
+    ll.setup_logging(console=True)
+    with ll.db() as con:
+        pulls = [r[0] for r in con.execute("SELECT id FROM jobs WHERE kind='deck_pull' AND status='queued' ORDER BY id")]
+        ids = args.ids or [r[0] for r in con.execute(
+            "SELECT l.id FROM lectures l WHERE l.slides_aligned_at IS NULL AND COALESCE(l.deck_how,'') != 'nothing' "
+            "AND NOT (l.deck_how='manual' AND l.deck_id IS NULL) AND l.status NOT IN ('duplicate','ingesting') "
+            "AND EXISTS (SELECT 1 FROM segments s WHERE s.lecture_id=l.id) ORDER BY l.id")]
+    failed = 0
+    for jid in pulls:
+        job = ll.run_job_now(jid, wait_retry=False)
+        if job["status"] == "queued":  # a passing failure (signed out, network): the server retries it
+            print(f"deck job {jid}: {job['progress']}, next try after {job['retry_at']} UTC")
+            continue
+        print(f"deck job {jid}: {job['status']} {job['error'] or job['result']}")
+        failed += job["status"] != "done"
+    for lid in ids:
+        with ll.db() as con:
+            busy = con.execute("SELECT 1 FROM jobs WHERE kind='slides' AND lecture_id=? AND status='running'",
+                               (lid,)).fetchone()
+        if busy:  # the server's worker is on it; running it here too would race on the same files
+            print(f"lecture {lid}: skipped, the server is working on it")
+            continue
+        job = ll.run_job_now(ll.enqueue_slides(lid))
+        print(f"lecture {lid}: {job['status']} {job['error'] or job['result']}")
+        failed += job["status"] != "done"
+    return 1 if failed else 0
+
+
 def cmd_colab_status(args) -> int:
     """Check the Colab CLI in WSL: login, compute units, running sessions."""
     ll.setup_logging(console=False)
@@ -269,6 +300,9 @@ def main(argv=None) -> int:
     g.add_argument("--local", action="store_true", help="use the local CPU model instead of Colab")
     g.add_argument("--colab", action="store_true", help="Colab only; fail instead of falling back")
     tr.set_defaults(fn=cmd_transcribe)
+    sl = sub.add_parser("slides", help="download queued decks and align slides now")
+    sl.add_argument("ids", nargs="*", type=int, help="lecture ids (default: transcribed and not aligned yet)")
+    sl.set_defaults(fn=cmd_slides)
     sub.add_parser("colab-status", help="check Colab login, compute units and sessions").set_defaults(fn=cmd_colab_status)
     b = sub.add_parser("benchmark", help="pick the local CPU model by speed and accuracy")
     b.add_argument("lecture", type=int, help="a lecture with a Colab transcript to score against")
