@@ -1757,9 +1757,14 @@ def _canvas_scan_course(course: dict, progress=None) -> dict:
                               (it["key"], course["id"], it["kind"], it.get("title"), it["url"], it.get("page_url"),
                                it.get("created_at"), it.get("page_link")))
             new += cur.rowcount
+    with db() as con:
+        lecs = rows(con.execute("SELECT title, date FROM lectures WHERE course_id=?", (course["id"],)))
+    skipped = [d["title"] for d in decks.values() if not looks_like_lecture_deck(d["title"], lecs)]
+    decks = {k: d for k, d in decks.items() if looks_like_lecture_deck(d["title"], lecs)}
     decks_new = record_decks(course["id"], decks)
-    log.info("canvas scan %s: %s items (%s new), %s decks (%s new)", course["code"], len(items), new,
-             len(decks), decks_new)
+    slides_scanned(course["id"])
+    log.info("canvas scan %s: %s items (%s new), %s decks (%s new); not lecture slides: %s", course["code"],
+             len(items), new, len(decks), decks_new, skipped)
     return {"found": len(items), "new": new, "decks": len(decks), "decks_new": decks_new}
 
 
@@ -2625,17 +2630,21 @@ def match_decks(course_id: int) -> list[int]:
     return changed
 
 
-def enqueue_slides(lecture_id: int) -> int | None:
+def enqueue_slides(lecture_id: int, ocr: bool = False) -> int | None:
     """Queue a slides job (find the deck, read it, align it) unless one is already waiting.
+    ocr=True (you asked) reads slides off the video even before the course's Canvas scan.
     Returns the job id, the waiting one's if there is one."""
     with db() as con:
         if q := con.execute("SELECT id FROM jobs WHERE kind='slides' AND lecture_id=? AND status='queued'",
                             (lecture_id,)).fetchone():
+            if ocr:
+                con.execute("UPDATE jobs SET payload=json_set(payload, '$.ocr', 1) WHERE id=?", (q[0],))
             return q[0]
         r = con.execute("SELECT d.title, d.source FROM lectures l LEFT JOIN decks d ON d.id=l.deck_id "
                         "WHERE l.id=?", (lecture_id,)).fetchone()
     title = ("video frames" if r["source"] == "ocr" else r["title"]) if r and r["title"] else "slides"
-    jid = enqueue("slides", {"lecture_id": lecture_id, "title": title}, lecture_id=lecture_id)
+    jid = enqueue("slides", {"lecture_id": lecture_id, "title": title, **({"ocr": 1} if ocr else {})},
+                  lecture_id=lecture_id)
     wake_workers()
     return jid
 
@@ -3164,6 +3173,8 @@ def job_slides(job: dict) -> dict:
                 return {"waiting": "no slides, and no transcript yet" if lec["video_path"] else "no slides"}
             with db() as con:
                 r = con.execute("SELECT id FROM decks WHERE key=? AND status='ready'", (f"ocr:{lid}",)).fetchone()
+            if not r and not job["payload"].get("ocr") and not slides_scan_done(lec["course_id"]):
+                return {"waiting": "the course's Canvas scan for slides"}  # the scan queues it again
             did = r[0] if r else ocr_video_deck(lec, say)
             with db() as con:  # OCR takes minutes: a deck you picked or attached meanwhile wins
                 con.execute("UPDATE lectures SET deck_id=?, deck_how=? WHERE id=? AND deck_id IS NULL "
@@ -3282,6 +3293,38 @@ def job_deck_pull(job: dict) -> dict:
 
 JOB_HANDLERS["slides"] = job_slides
 JOB_HANDLERS["deck_pull"] = job_deck_pull
+
+
+def looks_like_lecture_deck(title: str, lectures: list[dict]) -> bool:
+    """Canvas holds the syllabus, homework and readings too. Fetch a PDF/PPTX only if its name has
+    a lecture code (M2L1, Lecture 7, Week 3), says it's slides, or is close to a recording's title.
+    One skipped now is looked at again on the next scan, when its lecture may have been recorded."""
+    if title_codes(title).keys() & {0, 1, 2}:
+        return True
+    if re.search(r"(?i)\b(slides?|deck)\b", title or ""):
+        return True
+    return any(match_score({"title": title}, l) >= MATCH_MIN for l in lectures)
+
+
+def slides_scan_done(course_id: int | None) -> bool:
+    """Has the course been searched for decks? Until then a lecture without one doesn't get slides
+    read off its video (minutes of CPU), unless you ask: its deck may just not be found yet. A
+    course that isn't on Canvas has nothing to search."""
+    course = find_course(course_id) if course_id else None
+    return not (course and course.get("canvas_id")) or bool(meta_get(f"slides_scanned:{course_id}"))
+
+
+def slides_scanned(course_id: int) -> None:
+    """After a scan: lectures that were waiting for it get looked at (their deck downloads,
+    queued just before, run first)."""
+    meta_set(f"slides_scanned:{course_id}", datetime.now().isoformat(timespec="seconds"))
+    with db() as con:
+        waiting = [r[0] for r in con.execute(
+            "SELECT id FROM lectures l WHERE course_id=? AND deck_id IS NULL AND deck_how IS NULL AND slides_error "
+            "IS NULL AND video_path IS NOT NULL AND EXISTS (SELECT 1 FROM segments s WHERE s.lecture_id=l.id)",
+            (course_id,))]
+    for lid in waiting:
+        enqueue_slides(lid)
 
 
 def record_decks(course_id: int, found: dict[str, dict]) -> int:
@@ -3948,7 +3991,7 @@ def create_app():
                                                 (lec["deck_id"] or -1, lec["course_id"]))]
         for did in failed:  # decks that failed to download get fetched again (a bad file just fails again)
             retry_deck(did)
-        enqueue_slides(lecture_id)
+        enqueue_slides(lecture_id, ocr=True)  # you asked: read the video if no deck turns up
         return lecture_slides(lecture_id)
 
     @app.get("/media/slides/{deck_id}/{name}")

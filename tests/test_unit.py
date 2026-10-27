@@ -977,7 +977,13 @@ def test_canvas_scan_lists_decks_separately_and_queues_downloads(ll, monkeypatch
     files = {"video": [], "pdf": [{"id": 77, "display_name": "Lecture 7 Parsing.pdf", "content-type": "application/pdf",
                                    "size": 1 << 20, "created_at": "2026-09-01T12:00:00Z"},
                                   {"id": 78, "display_name": "Huge scan.pdf", "content-type": "application/pdf",
-                                   "size": 900 << 20}]}
+                                   "size": 900 << 20},
+                                  {"id": 79, "display_name": "Syllabus Fall 2026.pdf", "content-type": "application/pdf",
+                                   "size": 1 << 18},
+                                  {"id": 80, "display_name": "Homework 3.pdf", "content-type": "application/pdf",
+                                   "size": 1 << 18},
+                                  {"id": 81, "display_name": "Type Checking.pdf", "content-type": "application/pdf",
+                                   "size": 1 << 18}]}
 
     def fake_get(path, params=None, paginate=True):
         if path.endswith("/files"):
@@ -994,16 +1000,19 @@ def test_canvas_scan_lists_decks_separately_and_queues_downloads(ll, monkeypatch
     ll.set_canvas_state("connected", user="Kashi")
     c = ll.find_course("COP4020")
     c["canvas_id"] = 11
+    _lec(ll, "Type Checking", c["id"])  # a recording with that title: its deck is fetched
     out = ll.canvas_scan_course(c)
-    assert (out["new"], out["decks"], out["decks_new"]) == (1, 2, 2)  # the 900 MB scan is skipped
+    # the 900 MB scan is skipped, and so are the syllabus and the homework: not lecture slides
+    assert (out["new"], out["decks"], out["decks_new"]) == (1, 3, 3)
     with ll.db() as con:
         decks = {r[0]: r[1:] for r in con.execute("SELECT key, source, title, status FROM decks")}
         items = [r[0] for r in con.execute("SELECT key FROM canvas_items")]
         pulls = con.execute("SELECT COUNT(*) FROM jobs WHERE kind='deck_pull'").fetchone()[0]
     assert decks == {"canvas-file:77": ("canvas", "Lecture 7 Parsing", "new"),
+                     "canvas-file:81": ("canvas", "Type Checking", "new"),
                      "drive:1FakeSlides000000000000000000000": ("drive", "M0L1 Course Overview", "new")}
     assert items == ["drive:1FakeRecording00000000000000000-"]  # the Canvas tab only lists recordings
-    assert pulls == 2
+    assert pulls == 3
     assert ll.canvas_scan_course(c)["decks_new"] == 0  # a rescan doesn't queue them again
 
 
@@ -1242,3 +1251,27 @@ def test_slide_errors_shown_to_you_carry_no_local_paths(ll, monkeypatch):
         ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
     s = ll.lecture_slides(lid)
     assert s["state"] == "error" and str(ll.DATA) not in s["error"] and "server.log" in s["error"]
+
+
+def test_video_slides_wait_for_the_canvas_scan_unless_you_ask(ll, monkeypatch):
+    cid = ll.find_course("COP4020")["id"]
+    with ll.db() as con:
+        con.execute("UPDATE courses SET canvas_id=11 WHERE id=?", (cid,))
+    lid = _lec(ll, "Guest talk", cid, segs=_said([1, 2]), video="media/x/original.mp4")
+    read = []
+    monkeypatch.setattr(ll, "ocr_video_deck", lambda lec, progress=None: read.append(lec["id"]))
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    assert read == [] and ll.lecture_slides(lid)["reason"] == "not checked yet"  # its deck may turn up
+    ll.slides_scanned(cid)  # the scan found nothing for it: now the video is read
+    with ll.db() as con:
+        jobs = [ll.get_job(r[0]) for r in con.execute("SELECT id FROM jobs WHERE kind='slides' AND lecture_id=?",
+                                                       (lid,))]
+    assert len(jobs) == 1
+    ll.job_slides(jobs[0])
+    assert read == [lid]
+    # before any scan, "Look for slides" reads it right away
+    other = _lec(ll, "Another talk", cid, segs=_said([1, 2]), video="media/y/original.mp4")
+    with ll.db() as con:
+        con.execute("DELETE FROM meta WHERE key=?", (f"slides_scanned:{cid}",))
+    ll.job_slides(ll.get_job(ll.enqueue_slides(other, ocr=True)))
+    assert read == [lid, other]

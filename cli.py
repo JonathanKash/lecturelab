@@ -178,7 +178,7 @@ def cmd_slides(args) -> int:
         if busy:  # the server's worker is on it; running it here too would race on the same files
             print(f"lecture {lid}: skipped, the server is working on it")
             continue
-        job = ll.run_job_now(ll.enqueue_slides(lid))
+        job = ll.run_job_now(ll.enqueue_slides(lid, ocr=True))
         print(f"lecture {lid}: {job['status']} {job['error'] or job['result']}")
         failed += job["status"] != "done"
     return 1 if failed else 0
