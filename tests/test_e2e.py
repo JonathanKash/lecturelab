@@ -44,7 +44,9 @@ def server(tmp_path_factory):
     # Inboxes point at temp folders: the real Drive inbox must never be touched by tests.
     env = {**os.environ, "LECTURELAB_DATA": str(data), "LECTURELAB_PORT": str(PORT),
            "LECTURELAB_LOG": str(data / "server.log"), "LECTURELAB_INBOX": str(data / "inbox"),
-           "LECTURELAB_DRIVE_INBOX": str(data / "drive_inbox"), "LECTURELAB_INBOX_INTERVAL": "1"}
+           "LECTURELAB_DRIVE_INBOX": str(data / "drive_inbox"), "LECTURELAB_INBOX_INTERVAL": "1",
+           # Never touch the real Colab account from tests; transcribe with the small cached model.
+           "LECTURELAB_COLAB": "off", "LECTURELAB_LOCAL_MODEL": "base", "LECTURELAB_NOTIFY": "off"}
     assert health() is None, f"port {PORT} already in use"
     # pythonw + supervise is exactly how the logon task runs it: hidden, restarting on crash.
     sup = subprocess.Popen([str(PYTHONW), str(ROOT / "cli.py"), "supervise"], cwd=ROOT, env=env)
@@ -145,8 +147,10 @@ def test_upload_real_lecture_then_play_and_edit(page):
     expect(row).to_contain_text("COP4020")
     expect(row.locator("[data-status]")).to_have_attribute("data-status", "queued_transcribe")
     row.click()
+    # The view renders after a fetch, so wait for the player to exist before polling it.
+    expect(page.locator("#player")).to_be_attached()
     # The normalized 16 kHz FLAC is served with Range support: duration is right and seeking works.
-    page.wait_for_function("document.querySelector('#player').readyState >= 1")
+    page.wait_for_function("document.querySelector('#player')?.readyState >= 1")
     assert abs(page.evaluate("document.querySelector('#player').duration") - 480) < 2
     page.evaluate("document.querySelector('#player').currentTime = 300")
     page.wait_for_function("Math.abs(document.querySelector('#player').currentTime - 300) < 1")
@@ -157,6 +161,29 @@ def test_upload_real_lecture_then_play_and_edit(page):
     page.reload()
     expect(page.locator("#m-title")).to_have_value("PLC Lecture 1 · intro clip")
     expect(page.locator("#m-date")).to_have_value("2026-08-21")
+
+
+@needs_fixture
+def test_transcribe_locally_then_click_to_seek(page):
+    lec = next(l for l in api("/api/lectures") if l["title"].startswith("PLC Lecture 1"))
+    page.goto(f"{BASE}/#/lecture/{lec['id']}")
+    page.click("#tr-local")
+    expect(page.locator("#tr-source")).to_contain_text("local-base", timeout=600_000)
+    segs = page.locator(".seg")
+    n = segs.count()
+    # Whisper picks its own segment lengths (the base model gave 20-30 for this clip), so the
+    # word count is the real check on 8 minutes of speech.
+    assert n >= 10, n
+    words = " ".join(segs.all_inner_texts()).split()
+    assert len(words) > 600, len(words)  # people say ~120-160 words a minute
+    expect(page.locator("[data-status]").first).to_have_attribute("data-status", "transcribed")
+    target = segs.nth(n // 2)
+    t = float(target.get_attribute("data-start"))
+    target.locator("[data-seek]").click()
+    page.wait_for_function(f"Math.abs(document.querySelector('#player').currentTime - {t}) < 1.5")
+    expect(page.locator(".seg.now")).to_have_count(1, timeout=10_000)
+    with_words = api(f"/api/lectures/{lec['id']}/segments")
+    assert all(s["words"] for s in with_words[:10])  # word-level timestamps stored
 
 
 @needs_fixture
@@ -191,6 +218,19 @@ def test_reencoded_copy_flagged_and_released(server, page, tmp_path):
     expect(page.locator("#dup-banner")).to_contain_text("same recording as")
     page.click("#not-dup")
     expect(page.locator("[data-status]").first).to_have_attribute("data-status", "queued_transcribe")
+
+
+def test_canvas_tab_when_not_connected(page):
+    page.goto(BASE + "/")
+    page.click("#add-btn")
+    page.click("[data-tab=canvas]")
+    expect(page.locator("[data-canvas-state]")).to_have_attribute("data-canvas-state", "not_connected")
+    expect(page.locator("#cv-connect")).to_have_text("Connect Canvas")
+    expect(page.locator("#cv-status")).to_contain_text("GatorLink")
+    page.select_option("#cv-course", label="COP4020 · Programming Language Concepts")
+    page.click("#cv-scan")
+    expect(page.locator("#toast")).to_contain_text("isn't connected yet")
+    expect(page.locator("#canvas-badge")).to_be_hidden()  # the warning badge is only for an expired session
 
 
 def test_bad_link_reports_the_real_error(page):

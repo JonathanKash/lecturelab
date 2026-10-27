@@ -3,129 +3,346 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#F7F8FA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121418" media="(prefers-color-scheme: dark)">
 <title>LectureLab</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='2' y='12' width='28' height='8' rx='4' fill='%2316181D'/><rect x='20' y='12' width='10' height='8' rx='4' fill='%23FFE45C'/></svg>">
+<link rel="preload" href="/static/fonts/plex-sans-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/plex-sans-condensed-600.woff2" as="font" type="font/woff2" crossorigin>
 <style>
+/* Design direction lives in DESIGN.md: paper, ballpoint, highlighter; IBM Plex; the tape. */
+@font-face { font-family: "Plex Sans"; src: url(/static/fonts/plex-sans-400.woff2) format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Plex Sans"; src: url(/static/fonts/plex-sans-400-italic.woff2) format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: "Plex Sans"; src: url(/static/fonts/plex-sans-600.woff2) format("woff2"); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: "Plex Condensed"; src: url(/static/fonts/plex-sans-condensed-600.woff2) format("woff2"); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: "Plex Mono"; src: url(/static/fonts/plex-mono-400.woff2) format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 :root {
-  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e3e1da;
-  --accent: #2f6f5e; --accent-ink: #ffffff; --warn: #a15c07; --bad: #b3261e; --ok: #2f6f5e;
-  --chip: #ecebe5; --code: #f1efe8; --radius: 10px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg);
+  color-scheme: light;
+  --paper: #F7F8FA; --sheet: #FFFFFF; --ink: #16181D; --pencil: #5D6370; --ballpoint: #2747B8; --on-ballpoint: #FFFFFF;
+  --highlighter: #FFE45C; --hl-line: #FFE45C; --danger: #B42318; --rule: #E3E6EC;
+  --hover: color-mix(in srgb, var(--ink) 5%, transparent);
+  --sans: "Plex Sans", "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --cond: "Plex Condensed", "IBM Plex Sans Condensed", "Arial Narrow", "Plex Sans", sans-serif;
+  --mono: "Plex Mono", "IBM Plex Mono", Consolas, ui-monospace, monospace;
+  --t-xs: 13px; --t-s: 15px; --t-m: 17px; --t-l: 22px; --t-xl: 34px;
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  font: 400 var(--t-s)/1.5 var(--sans); color: var(--ink); background: var(--paper);
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9b9a94; --line: #34332f;
-          --accent: #6fbfa6; --accent-ink: #10201b; --chip: #2c2c29; --code: #2a2a27; --warn: #e0a24f; --bad: #f08a80; }
+  :root { color-scheme: dark;
+    --paper: #121418; --sheet: #1A1D23; --ink: #E8EAEE; --pencil: #9AA1AE; --ballpoint: #8FA8FF; --on-ballpoint: #10142A;
+    --highlighter: #E3C341; --hl-line: color-mix(in srgb, #E3C341 24%, transparent); --danger: #F97066; --rule: #2C3038; }
 }
 * { box-sizing: border-box; }
-body { margin: 0; display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
-aside { border-right: 1px solid var(--line); padding: 16px; display: flex; flex-direction: column; gap: 12px; background: var(--panel); }
-aside h1 { font-size: 18px; margin: 0 0 4px; }
-aside nav a { display: block; padding: 6px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: 14px; }
-aside nav a.active, aside nav a:hover { background: var(--bg); }
-aside .section { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 8px; }
-main { padding: 24px 32px; max-width: 1100px; width: 100%; }
-h2 { margin: 0 0 16px; font-size: 22px; }
-h3 { margin: 0 0 10px; font-size: 15px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
+[hidden] { display: none !important; }  /* .field etc. set display, which would otherwise beat the attribute */
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+body { margin: 0; display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; background: var(--paper); }
+:focus-visible { outline: 2px solid var(--ballpoint); outline-offset: 2px; }
+a { color: var(--ballpoint); text-underline-offset: 2px; }
+.skip { position: absolute; left: 8px; top: 8px; z-index: 10; transform: translateY(-200%); }
+.skip:focus-visible { transform: none; }
+
+/* ---- rail */
+aside { position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 1px solid var(--rule);
+  padding: 24px 16px 16px; display: flex; flex-direction: column; gap: 16px; }
+.brand { font: 600 var(--t-l)/1 var(--cond); margin: 0 0 8px; display: flex; align-items: center; gap: 10px; }
+.brand-mark { width: 24px; height: 8px; border-radius: 4px; background: var(--ink); box-shadow: inset -8px 0 0 var(--highlighter); flex: none; }
+.navs { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.nav-head { font-size: var(--t-xs); font-weight: 600; color: var(--pencil); margin: 16px 8px 0; }
+aside nav { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+aside nav a { display: flex; align-items: baseline; gap: 8px; padding: 7px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; min-width: 0; }
+aside nav a:hover { background: var(--hover); }
+aside nav a[aria-current="page"] { background: var(--sheet); box-shadow: inset 3px 0 0 var(--ink), inset 0 0 0 1px var(--rule); font-weight: 600; }
+#course-nav a { flex-direction: column; gap: 0; }
+#course-nav b { font: 600 var(--t-s)/1.3 var(--cond); }
+#course-nav .muted { font-size: var(--t-xs); font-weight: 400; line-height: 1.35; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aside-foot { margin-top: auto; display: grid; gap: 4px; justify-items: start; font-size: var(--t-xs); }
+#health { color: var(--pencil); }
+#health.down { color: var(--danger); font-weight: 600; }
+
+/* ---- page */
+main { padding: 32px 48px 64px; max-width: 1040px; width: 100%; min-width: 0; outline: none; }
+h2 { font: 600 var(--t-xl)/1.1 var(--cond); margin: 0; text-wrap: balance; overflow-wrap: anywhere; }
+h3 { font: 600 var(--t-l)/1.2 var(--cond); margin: 0; text-wrap: balance; }
+.page-head { display: flex; gap: 12px 24px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; margin-bottom: 24px; }
+.page-head > div { min-width: 0; }
+.sub { margin: 8px 0 0; color: var(--pencil); display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+.lede { margin: -12px 0 32px; color: var(--pencil); max-width: 68ch; }
+.sec { padding: 32px 0; border-top: 1px solid var(--rule); }
+.sec-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 24px; flex-wrap: wrap; margin-bottom: 16px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .spread { justify-content: space-between; }
-.muted { color: var(--muted); }
-.small { font-size: 13px; }
-button, .btn { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 14px; cursor: pointer; text-decoration: none; display: inline-block; }
-button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
-button.danger { background: transparent; color: var(--bad); border: 1px solid var(--line); }
-button:disabled { opacity: .5; cursor: default; }
-input, textarea, select { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
-textarea { min-height: 160px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
-label.field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
-.grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
-.form3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; }
-.empty { text-align: center; padding: 40px 16px; color: var(--muted); }
-.chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
-.chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); } .chip.warn { color: var(--warn); }
-.lec { display: grid; grid-template-columns: 90px 1fr auto; gap: 12px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); text-decoration: none; color: inherit; }
-.lec:last-child { border-bottom: 0; }
-.lec:hover { background: var(--bg); }
-.lec .t { font-weight: 550; }
-.list { padding: 0; overflow: hidden; }
-.banner { border-left: 3px solid var(--warn); }
-.banner.bad { border-left-color: var(--bad); }
-.jobs .job { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 4px 0; }
-.spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; flex: none; }
-@keyframes spin { to { transform: rotate(360deg); } }
-video, audio { width: 100%; border-radius: 8px; background: #000; }
-audio { background: transparent; }
-dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(620px, 94vw); background: var(--panel); color: var(--ink); }
-dialog::backdrop { background: rgba(0,0,0,.35); }
-dialog .head { padding: 16px 18px 0; } dialog .body { padding: 14px 18px; display: grid; gap: 12px; } dialog .foot { padding: 0 18px 16px; }
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-top: 12px; }
-.tabs button { background: transparent; color: var(--muted); border-radius: 0; border-bottom: 2px solid transparent; padding: 8px 12px; }
-.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
-.drop { border: 2px dashed var(--line); border-radius: 10px; padding: 24px; text-align: center; color: var(--muted); cursor: pointer; }
-.drop.over { border-color: var(--accent); color: var(--ink); }
-code.path { font-size: 12px; background: var(--code); padding: 2px 6px; border-radius: 4px; word-break: break-all; }
-.toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 480px; }
-.toast.show { opacity: 1; }
-@media (max-width: 760px) { body { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } main { padding: 16px; } .form3 { grid-template-columns: 1fr; } .lec { grid-template-columns: 1fr auto; } .lec .d { display: none; } }
+.end { justify-content: flex-end; }
+.muted { color: var(--pencil); }
+.small { font-size: var(--t-xs); }
+.code { font: 600 var(--t-s)/1.2 var(--cond); color: var(--ink); white-space: nowrap; }
+.num { font: 400 var(--t-xs)/1.2 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.err { color: var(--danger); font-weight: 600; }
+
+/* ---- controls */
+button, .btn { font: 600 var(--t-s)/1.2 var(--sans); background: var(--ballpoint); color: var(--on-ballpoint); border: 1px solid transparent;
+  border-radius: 8px; padding: 9px 16px; min-height: 40px; cursor: pointer; text-decoration: none;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+button:hover:not(:disabled) { background: color-mix(in srgb, var(--ballpoint) 80%, var(--ink)); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button.ghost { background: transparent; color: var(--ink); border-color: var(--rule); }
+button.ghost:hover:not(:disabled) { background: var(--sheet); border-color: var(--pencil); }
+button.danger { background: transparent; color: var(--danger); border-color: var(--rule); }
+button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 8%, transparent); border-color: var(--danger); }
+button.danger.solid { background: var(--danger); color: var(--paper); border-color: transparent; }
+button.danger.solid:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 82%, var(--ink)); }
+a.btn:hover { background: color-mix(in srgb, var(--ballpoint) 80%, var(--ink)); }
+a.btn:active { transform: translateY(1px); }
+a.btn.ghost { background: transparent; color: var(--ink); border-color: var(--rule); }
+a.btn.ghost:hover { background: var(--sheet); border-color: var(--pencil); }
+.field-error { margin: 6px 0 0; font-size: var(--t-xs); font-weight: 600; color: var(--danger); }
+.drop:has([aria-invalid="true"]) { border-color: var(--danger); }
+.sk { display: block; max-width: 100%; border-radius: 4px; background: var(--rule); animation: pulse 1s var(--ease-out) infinite alternate; }
+@keyframes pulse { to { opacity: .45; } }
+button.text { background: none; border: 0; padding: 2px 0; min-height: 0; color: var(--ballpoint); font-weight: 600; }
+button.text:hover:not(:disabled) { background: none; text-decoration: underline; text-underline-offset: 2px; }
+button.text.warn-text { color: var(--danger); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+input, textarea, select { font: 400 var(--t-s)/1.4 var(--sans); color: var(--ink); background: var(--sheet); border: 1px solid var(--rule);
+  border-radius: 8px; padding: 9px 12px; width: 100%; min-width: 0; }
+input:hover, textarea:hover, select:hover { border-color: var(--pencil); }
+[aria-invalid="true"] { border-color: var(--danger); }
+input[type="checkbox"] { width: 18px; height: 18px; padding: 0; accent-color: var(--ballpoint); flex: none; }
+textarea { min-height: 200px; line-height: 1.5; resize: vertical; }
+label.field { display: grid; gap: 6px; font-size: var(--t-xs); font-weight: 600; color: var(--pencil); }
+.hint { margin: 0; font-size: var(--t-xs); color: var(--pencil); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 40px 32px; }
+.form3 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }  /* title on its own row, course + date below */
+.form3 > :first-child { grid-column: 1 / -1; }
+
+/* ---- lecture list */
+.list { border-top: 1px solid var(--rule); }
+.lec, .lec-sk { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 24px; padding: 16px 12px; margin: 0 -12px;
+  color: inherit; text-decoration: none; position: relative; border-radius: 6px; }
+/* The rule sits on the text column, not under the 12px hover bleed, so it lines up with the header and list top. */
+.lec::after, .lec-sk::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: 0; height: 1px; background: var(--rule); }
+.lec:hover { background: var(--sheet); }
+.lec:hover::after { opacity: 0; }
+.lec .t { font-size: var(--t-m); font-weight: 600; line-height: 1.3; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.lec:hover .t { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.lec .d { font-size: var(--t-xs); color: var(--pencil); white-space: nowrap; padding-top: 3px; }
+.lec .meta, .lec-sk .meta { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px 12px; min-width: 0; font-size: var(--t-xs); color: var(--pencil); }
+.lec .meta .chip { margin-left: auto; margin-right: -6px; }
+/* ---- the tape: length is the lecture's duration, texture is where its transcript is (DESIGN.md) */
+.tape { display: block; flex: 1 1 120px; max-width: 320px; height: 8px; }
+.tape > span { position: relative; display: block; height: 100%; width: calc(var(--len, 1) * 100%); min-width: 10px; border-radius: 4px; overflow: hidden; }
+.tape[data-tape="waiting"] > span { border-radius: 0; background: repeating-linear-gradient(90deg, var(--pencil) 0 3px, transparent 3px 7px) center / 100% 2px no-repeat; }
+.lec .meta .code { width: 72px; flex: none; overflow: hidden; text-overflow: ellipsis; }
+.tape[data-tape="active"] > span { background: color-mix(in srgb, var(--highlighter) 30%, transparent); box-shadow: inset 0 0 0 1px var(--pencil); }
+.tape[data-tape="active"] > span::after, .scrub[data-tape="active"] .scrub-track::after { content: ""; position: absolute; inset: 0;
+  background: var(--highlighter); transform-origin: left; animation: sweep 2.4s var(--ease-out) infinite; }
+.tape[data-tape="done"] > span { background: var(--ink); }
+.tape[data-tape="error"] > span { background: var(--danger); }
+.tape[data-tape="dup"] > span { box-shadow: inset 0 0 0 1px var(--pencil);
+  background: repeating-linear-gradient(135deg, var(--pencil) 0 2px, transparent 2px 5px); }
+.scrub-wrap { position: sticky; top: 0; z-index: 2; background: var(--paper); padding: 12px 0; margin-bottom: 8px; box-shadow: 0 1px 0 var(--rule);
+  display: flex; align-items: center; gap: 16px; }
+.scrub { position: relative; flex: 1; height: 28px; cursor: pointer; touch-action: none; border-radius: 4px; }
+.scrub-track { position: absolute; left: 0; right: 0; top: 8px; height: 12px; border-radius: 3px; overflow: hidden; color: var(--ink); }
+.scrub[data-tape="waiting"] .scrub-track { border: 1.5px dashed var(--pencil); }
+.scrub[data-tape="active"] .scrub-track { background: color-mix(in srgb, var(--highlighter) 30%, transparent); box-shadow: inset 0 0 0 1px var(--pencil); }
+.scrub[data-tape="done"] .scrub-track { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.scrub[data-tape="error"] .scrub-track { box-shadow: inset 0 0 0 1.5px var(--danger); }
+.scrub[data-tape="dup"] .scrub-track { box-shadow: inset 0 0 0 1px var(--pencil);
+  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--pencil) 50%, transparent) 0 2px, transparent 2px 5px); }
+.scrub-track svg { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .5; }
+.scrub-played { position: absolute; inset: 0; background: var(--highlighter); transform-origin: left; transform: scaleX(var(--p, 0)); }
+.scrub-head { position: absolute; inset: 2px 0; pointer-events: none; transform: translateX(calc(var(--p, 0) * 100%)); }
+.scrub-head::before { content: ""; position: absolute; left: -1px; top: 0; bottom: 0; width: 2px; border-radius: 1px; background: var(--ink); }
+.scrub:hover .scrub-head::before { width: 3px; left: -1.5px; }
+#scrub-time { color: var(--pencil); min-width: 9ch; text-align: right; }
+.keys { margin: -4px 0 16px; }
+html { scroll-padding-top: 64px; }  /* the sticky tape must never cover a focused timestamp */
+.chip { display: inline-block; font-size: var(--t-xs); line-height: 1.4; padding: 1px 6px; border-radius: 3px; color: var(--pencil); white-space: nowrap; }
+.chip.now { background: var(--highlighter); color: #16181D; }
+.chip.ok { color: var(--ink); }
+.chip.bad { color: var(--danger); font-weight: 600; }
+.chip.warn { color: var(--ink); box-shadow: inset 0 0 0 1px var(--pencil); }
+.chip.kind { box-shadow: inset 0 0 0 1px var(--rule); }
+.empty { padding: 48px 0; border-top: 1px solid var(--rule); }
+.empty[data-error] { border-top: 0; padding-top: 16px; }
+.empty .hint { margin: 0; }
+.empty p { color: var(--pencil); max-width: 60ch; margin: 8px 0 20px; }
+.inboxes { margin-top: 48px; display: grid; gap: 8px; }
+.inboxes h3 { font: 600 var(--t-s)/1.3 var(--sans); }
+.inbox { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; min-width: 0; }
+code.path { font: 400 12px/1.6 var(--mono); padding: 1px 6px; border-radius: 4px; border: 1px solid var(--rule); background: var(--sheet); overflow-wrap: anywhere; }
+
+/* ---- background work */
+.jobs { padding: 12px 16px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; margin-bottom: 24px; }
+.jobs h3 { font: 600 var(--t-s)/1.3 var(--sans); margin-bottom: 4px; }
+.job { display: flex; gap: 12px; align-items: baseline; font-size: var(--t-xs); padding: 4px 0; min-width: 0; }
+.job .sweep, .job .still { align-self: center; }
+.job-what { flex: none; font-weight: 600; }
+.job-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-queue { font-size: var(--t-xs); color: var(--pencil); }
+.job-queue summary { display: flex; align-items: center; gap: 12px; padding: 4px 0; cursor: pointer; list-style: none; width: fit-content; }
+.job-queue summary::-webkit-details-marker { display: none; }
+.job-queue summary::after { content: "Show"; content: "Show" / ""; color: var(--ink); text-decoration: underline;
+  text-decoration-color: var(--rule); text-underline-offset: 3px; }
+.job-queue[open] summary::after { content: "Hide"; content: "Hide" / ""; }
+.job-queue summary:hover::after { text-decoration-color: currentColor; }
+.job-queue ul { margin: 0 0 4px 40px; padding: 0; list-style: none; max-height: 160px; overflow: auto; font: var(--t-xs)/1.7 var(--mono); }
+.still { width: 28px; height: 2px; flex: none; background: repeating-linear-gradient(90deg, var(--pencil) 0 3px, transparent 3px 7px); }
+.sweep { position: relative; width: 28px; height: 6px; border-radius: 3px; overflow: hidden; flex: none;
+  background: color-mix(in srgb, var(--highlighter) 35%, transparent); box-shadow: inset 0 0 0 1px var(--pencil); }
+.sweep::after { content: ""; position: absolute; inset: 0; background: var(--highlighter); transform-origin: left;
+  animation: sweep 1.6s var(--ease-out) infinite; }
+@keyframes sweep { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.banner { padding: 12px 16px; border-left: 3px solid var(--ink); background: var(--sheet); border-radius: 0 8px 8px 0; margin-bottom: 16px; }
+.banner.bad { border-left-color: var(--danger); }
+
+/* ---- lecture page */
+.player { margin-bottom: 24px; }
+video, audio { width: 100%; display: block; border-radius: 8px; }
+video { max-height: 50vh; background: #000; }
+#transcript { margin: 0 -8px; }
+.seg, .seg-sk { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 12px; margin: 0; padding: 4px 8px; border-radius: 4px;
+  font-size: var(--t-m); line-height: 1.6; max-width: calc(68ch + 84px); }
+.seg.now { background: var(--hl-line); }
+.seg .ts { background: none; border: 0; padding: 3px 0 0; min-height: 0; border-radius: 3px; display: block; text-align: right; align-self: start;
+  font: 400 var(--t-xs)/1.6 var(--mono); font-variant-numeric: tabular-nums; color: var(--pencil); }
+.seg .ts:hover:not(:disabled) { background: none; color: var(--ballpoint); text-decoration: underline; }
+.source { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 4px 0; min-width: 0; }
+
+/* ---- dialog */
+dialog { border: 1px solid var(--rule); border-radius: 12px; padding: 0; width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 32px);
+  background: var(--sheet); color: var(--ink); overscroll-behavior: contain; box-shadow: 0 24px 64px rgba(0, 0, 0, .2); }
+dialog[open] { animation: rise 180ms var(--ease-out); }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+dialog::backdrop { background: rgba(10, 12, 16, .45); }
+dialog h2 { font-size: var(--t-l); }
+dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; display: grid; gap: 16px; } dialog .foot { padding: 0 24px 24px; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--rule); margin-top: 16px; }
+.tabs button { background: transparent; color: var(--pencil); border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; margin-bottom: -1px; }
+.tabs button:hover:not(:disabled) { background: none; color: var(--ink); }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+.drop { display: block; border: 1.5px dashed var(--pencil); border-radius: 10px; padding: 32px 16px; text-align: center; color: var(--pencil); cursor: pointer; }
+.drop:hover, .drop.over { border-color: var(--ink); background: var(--paper); }
+.drop:focus-within { outline: 2px solid var(--ballpoint); outline-offset: 2px; }
+.drop strong { display: block; color: var(--ink); font-size: var(--t-m); margin-bottom: 4px; overflow-wrap: anywhere; }
+.drop.has-file { border-style: solid; border-color: var(--ink); }
+#cv-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 0; border-block: 1px solid var(--rule); }
+#cv-items label { display: flex; gap: 8px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--rule); }
+
+/* ---- toast */
+.toast { position: fixed; bottom: 24px; right: 24px; z-index: 20; background: var(--ink); color: var(--paper); padding: 12px 16px; border-radius: 8px;
+  max-width: min(480px, calc(100vw - 32px)); opacity: 0; transform: translateY(8px); pointer-events: none;
+  transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out); }
+.toast.show { opacity: 1; transform: none; }
+
+@media (pointer: coarse) {
+  button, aside nav a, .tabs button { min-height: 44px; }
+  .seg .ts { min-height: 0; }
+  .keys { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0s !important; animation-iteration-count: 1 !important; transition-duration: 0s !important; }
+}
+@media (max-width: 760px) {
+  body { grid-template-columns: minmax(0, 1fr); }
+  aside { position: static; height: auto; overflow: visible; flex-direction: row; flex-wrap: wrap; align-items: center;
+    padding: 12px 16px 0; gap: 12px; border-right: 0; border-bottom: 1px solid var(--rule); }
+  .brand { flex: 1; margin: 0; }
+  .navs { flex-basis: 100%; flex-direction: row; gap: 4px; overflow-x: auto; margin: 0 -16px; padding: 0 16px; scrollbar-width: none; }
+  .nav-head { display: none; }
+  aside nav { flex-direction: row; gap: 4px; flex: none; }
+  aside nav a, #course-nav a { flex: none; flex-direction: row; white-space: nowrap; align-items: center; min-height: 44px; padding: 8px 10px; border-radius: 0; }
+  aside nav a[aria-current="page"] { background: none; box-shadow: inset 0 -2px 0 var(--ink); }
+  #course-nav .muted { display: none; }
+  .aside-foot { flex-basis: 100%; margin: 0 0 8px; }
+  .aside-foot:not(:has(#health.down, #canvas-badge:not([hidden]))) { display: none; }
+  main { padding: 24px 16px 48px; }
+  h2 { font-size: 28px; }
+  .lec { gap: 4px 12px; }
+  .lec .meta { flex-wrap: wrap; }
+  .job-rows .job { flex-wrap: wrap; row-gap: 0; }
+  .job-rows .job-detail { flex-basis: 100%; padding-left: 40px; white-space: normal; overflow-wrap: anywhere; }
+  .lec .tape { order: -1; flex-basis: 100%; max-width: none; margin: 4px 0 2px; }
+}
+@media (max-width: 480px) { .form3 { grid-template-columns: 1fr; } }
+@media (pointer: coarse) { button.text, .job-queue summary { min-height: 44px; } }
 </style>
 </head>
 <body>
+<button class="skip" id="skip" type="button">Skip to content</button>
 <aside>
-  <h1>🎓 LectureLab</h1>
-  <button id="add-btn">＋ Add recording</button>
-  <nav id="nav">
-    <a href="#/" data-route="library">Library</a>
-    <a href="#/courses" data-route="courses">Courses &amp; vocabulary</a>
-  </nav>
-  <div class="section">Courses</div>
-  <nav id="course-nav"></nav>
-  <div style="flex:1"></div>
-  <div class="small muted" id="health">connecting…</div>
+  <h1 class="brand" translate="no"><span class="brand-mark" aria-hidden="true"></span>LectureLab</h1>
+  <button id="add-btn" type="button" aria-keyshortcuts="A" title="Add recording (A)">Add recording</button>
+  <div class="navs">
+    <nav id="nav" aria-label="Main">
+      <a href="#/" data-route="library">Library</a>
+      <a href="#/courses" data-route="courses">Courses &amp; vocabulary</a>
+    </nav>
+    <div class="nav-head" id="courses-head">Courses</div>
+    <nav id="course-nav" aria-labelledby="courses-head"></nav>
+  </div>
+  <div class="aside-foot">
+    <button type="button" class="text warn-text" id="canvas-badge" hidden>Canvas needs sign-in</button>
+    <div id="health">Connecting…</div>
+  </div>
 </aside>
-<main id="view"></main>
+<main id="view" tabindex="-1"></main>
 
-<dialog id="add-dlg">
-  <form method="dialog" id="add-form">
-    <div class="head"><h2 style="margin:0">Add recording</h2>
-      <div class="tabs" role="tablist">
-        <button type="button" data-tab="file" class="on">File</button>
-        <button type="button" data-tab="link">Link</button>
-        <button type="button" data-tab="canvas">Canvas</button>
+<dialog id="add-dlg" aria-labelledby="add-title-h">
+  <form method="dialog" id="add-form" novalidate>
+    <div class="head"><h2 id="add-title-h">Add recording</h2>
+      <div class="tabs" role="tablist" aria-label="Where the recording comes from">
+        <button type="button" role="tab" id="tab-file" aria-controls="pane-file" aria-selected="true" data-tab="file" class="on">File</button>
+        <button type="button" role="tab" id="tab-link" aria-controls="pane-link" aria-selected="false" tabindex="-1" data-tab="link">Link</button>
+        <button type="button" role="tab" id="tab-canvas" aria-controls="pane-canvas" aria-selected="false" tabindex="-1" data-tab="canvas">Canvas</button>
       </div>
     </div>
     <div class="body">
-      <div data-pane="file">
+      <div data-pane="file" role="tabpanel" id="pane-file" aria-labelledby="tab-file">
         <label class="drop" id="drop">
-          <input type="file" id="add-file" accept=".mp4,.mov,.mkv,.webm,.m4a,.mp3,.wav" hidden>
-          <span id="drop-label">Drop a recording here or click to choose<br><span class="small">mp4, mov, mkv, webm, m4a, mp3, wav</span></span>
+          <input type="file" id="add-file" accept=".mp4,.mov,.mkv,.webm,.m4a,.mp3,.wav" class="vh">
+          <span id="drop-label"><strong>Drop a recording here</strong>or click to choose a file<br><span class="small">mp4, mov, mkv, webm, m4a, mp3, wav</span></span>
         </label>
       </div>
-      <div data-pane="link" hidden>
+      <div data-pane="link" role="tabpanel" id="pane-link" aria-labelledby="tab-link" hidden>
         <label class="field">Link (Zoom, Google Drive, YouTube, Panopto, Mediasite, Kaltura…)
-          <input id="add-url" type="url" placeholder="https://"></label>
+          <input id="add-url" type="url" name="url" autocomplete="off" spellcheck="false" placeholder="https://ufl.zoom.us/rec/share/…"></label>
         <label class="field" id="passcode-field" hidden>Zoom passcode (if the recording has one)
-          <input id="add-passcode" autocomplete="off"></label>
+          <input id="add-passcode" name="passcode" autocomplete="off" spellcheck="false"></label>
       </div>
-      <div data-pane="canvas" hidden>
-        <div class="row spread"><span class="small muted">Pick a course below, then scan its Canvas Files, Modules, Pages and Announcements for recordings.</span>
+      <div data-pane="canvas" role="tabpanel" id="pane-canvas" aria-labelledby="tab-canvas" hidden>
+        <div id="cv-status"></div>
+        <div class="row spread"><span class="hint">Choose a course above, then scan its Canvas Files, Modules, Pages and Announcements for recordings.</span>
           <button type="button" class="ghost" id="cv-scan">Scan Canvas</button></div>
-        <label class="small row" style="gap:6px"><input type="checkbox" id="cv-auto" style="width:auto"> Auto-pull new recordings for this course on every sync</label>
+        <label class="row small" style="gap:8px"><input type="checkbox" id="cv-auto"> Auto-pull new recordings for this course on every sync</label>
         <div id="cv-items" class="small" style="max-height:260px;overflow:auto"></div>
       </div>
-      <div class="form3">
-        <label class="field">Title <input id="add-title" placeholder="from the recording"></label>
-        <label class="field">Course <select id="add-course"></select></label>
-        <label class="field">Date <input id="add-date" type="date"></label>
+      <div id="add-meta" style="display:grid;gap:8px">
+        <div class="form3">
+          <label class="field">Title <input id="add-title" name="title" autocomplete="off" placeholder="From the recording…"></label>
+          <label class="field">Course <select id="add-course" name="course"></select></label>
+          <label class="field">Date <input id="add-date" name="date" type="date"></label>
+        </div>
+        <p class="hint">Title and date are optional: they come from the source’s metadata when it has them.</p>
       </div>
-      <p class="small muted" style="margin:0">Title and date are optional: they come from the source's metadata when it has them.</p>
     </div>
     <div class="foot row spread">
       <button type="button" class="ghost" id="add-cancel">Cancel</button>
-      <button type="submit" id="add-submit">Add</button>
+      <button type="submit" id="add-submit">Add recording</button>
     </div>
   </form>
 </dialog>
-<div class="toast" id="toast"></div>
+<dialog id="confirm-dlg" aria-labelledby="confirm-h" style="width:min(440px, calc(100vw - 32px))">
+  <form method="dialog">
+    <div class="head"><h2 id="confirm-h"></h2></div>
+    <div class="body"><p id="confirm-msg" class="muted" style="margin:0"></p></div>
+    <div class="foot row end"><button value="cancel" class="ghost" autofocus>Cancel</button><button value="ok" class="danger solid" id="confirm-ok"></button></div>
+  </form>
+</dialog>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -141,16 +358,22 @@ async function api(path, opts = {}) {
     const text = await res.text();
     let msg = text || res.statusText;
     try { const d = JSON.parse(text).detail; msg = typeof d === "string" ? d : JSON.stringify(d); } catch {}
-    throw new Error(msg);
+    throw Object.assign(new Error(msg), { status: res.status });
   }
   return res.headers.get("content-type")?.includes("json") ? res.json() : res.text();
 }
 function toast(msg, ms = 2600) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), ms); }
 const fmtDur = s => { if (!s) return ""; s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
   return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(s % 60).padStart(2, "0")}s`; };
-const STATUS = { queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "warn"],
+// Lecture dates are plain YYYY-MM-DD (local); source timestamps are SQLite UTC "YYYY-MM-DD HH:MM:SS".
+const fmtDate = iso => { if (!iso) return ""; const [y, m, d] = iso.split("-").map(Number);
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", ...(y !== new Date().getFullYear() && { year: "numeric" }) })
+    .format(new Date(y, m - 1, d)); };
+const utc = s => Date.parse(s.replace(" ", "T") + "Z");
+const fmtWhen = s => s ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(utc(s)) : "";
+const STATUS = { queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "now"],
   transcribed: ["transcribed", "ok"], aligned: ["aligned", "ok"], notes_queued: ["notes queued", ""],
-  notes_running: ["writing notes", "warn"], notes_done: ["notes ready", "ok"], exported: ["exported", "ok"],
+  notes_running: ["writing notes", "now"], notes_done: ["notes ready", "ok"], exported: ["exported", "ok"],
   duplicate: ["possible duplicate", "warn"], error: ["error", "bad"], waiting_quota: ["waiting for plan limit", "warn"] };
 const chip = st => { const [label, cls] = STATUS[st] || [st, ""]; return `<span class="chip ${cls}" data-status="${esc(st)}">${esc(label)}</span>`; };
 const courseOptions = (sel, blank = "No course") => `<option value="">${blank}</option>` +
@@ -159,79 +382,175 @@ const courseOptions = (sel, blank = "No course") => `<option value="">${blank}</
 async function loadCourses() {
   state.courses = await api("/api/courses");
   $("#course-nav").innerHTML = state.courses.map(c =>
-    `<a href="#/course/${c.id}" data-route="course-${c.id}" title="${esc(c.name)}"><b>${esc(c.code)}</b> <span class="muted">${esc(c.name)}</span></a>`).join("");
+    `<a href="#/course/${c.id}" data-route="course-${c.id}" title="${esc(c.name)}"><b translate="no">${esc(c.code)}</b> <span class="muted">${esc(c.name)}</span></a>`).join("");
 }
 async function loadLectures() { state.lectures = await api("/api/lectures"); }
 
-function lectureList(lectures) {
-  if (!lectures.length) return `<div class="card empty">No lectures yet. Use <b>＋ Add recording</b>, or drop files in an inbox folder.</div>`;
-  return `<div class="card list">${lectures.map(l => `
+// Where the transcript is, as a tape texture. Everything after "transcribed" has one.
+const tapeState = st => st === "queued_transcribe" ? "waiting" : st === "transcribing" ? "active"
+  : st === "error" ? "error" : st === "duplicate" ? "dup" : "done";
+
+function lectureList(lectures, course = null, inboxes = []) {
+  if (!lectures.length) {
+    const folders = inboxes.map(i => `<div class="inbox"><code class="path">${esc(i.path)}\\${course ? esc(course.code) : "&lt;COURSE&gt;"}\\</code>
+      <span class="small muted">${i.kind === "drive" ? "Google Drive" : "This laptop"}</span></div>`).join("");
+    return `<div class="empty"><h3>${course ? `No ${esc(course.code)} lectures yet` : "Your library is empty"}</h3>
+      <p>Add a recording from a file, a link or Canvas. Transcripts and notes are made from it in the background.</p>
+      <button type="button" data-action="add">Add recording</button>
+      ${folders ? `<div class="inboxes" style="margin-top:32px"><p class="hint">Or drop a file into an inbox folder:</p>${folders}</div>` : ""}</div>`;
+  }
+  const longest = Math.max(...lectures.map(l => l.duration_sec || 0)) || 1;
+  return `<div class="list">${lectures.map(l => `
     <a class="lec" href="#/lecture/${l.id}" data-lecture="${l.id}">
-      <span class="small muted d">${esc(l.date || "")}</span>
-      <span><span class="t">${esc(l.title)}</span><br><span class="small muted">${esc(l.course_code || "no course")} · ${fmtDur(l.duration_sec)}${l.has_video ? " · video" : ""}</span></span>
-      ${chip(l.status)}
+      <span class="t">${esc(l.title)}</span>
+      <span class="d">${esc(fmtDate(l.date))}</span>
+      <span class="meta"><span class="code" translate="no">${esc(l.course_code || "No course")}</span>
+        <span class="tape" data-tape="${tapeState(l.status)}" style="--len:${Math.max((l.duration_sec || 0) / longest, .04).toFixed(3)}" aria-hidden="true"><span></span></span>
+        <span class="num">${l.duration_sec ? fmtTs(l.duration_sec) : ""}</span>${l.has_video ? "<span>video</span>" : ""}
+        ${chip(l.status)}</span>
     </a>`).join("")}</div>`;
 }
 
+const termCount = v => { const n = (v || "").split("\n").filter(t => t.trim()).length;
+  return n ? `${n} ${n === 1 ? "term" : "terms"}` : "No terms yet"; };
+const jobKind = k => k.charAt(0).toUpperCase() + k.slice(1);
+const JOB_VERB = { ingest: "Adding a recording", canvas_pull: "Pulling from Canvas", canvas_scan: "Scanning Canvas",
+  transcribe: "Transcribing" };
+const JOB_WAIT = { ingest: "waiting to be added", canvas_pull: "waiting to be pulled from Canvas",
+  canvas_scan: "Canvas scans waiting", transcribe: "waiting to transcribe" };
+const OPAQUE = /^[a-z]+:[\w-]{16,}$/;
+const jobVerb = k => JOB_VERB[k] || jobKind(k.replace(/_/g, " "));
+// Running jobs get a row each; queued ones collapse to one line per kind, so a 26-file pull doesn't bury the Library.
 function jobsPanel() {
   if (!state.jobs.length) return "";
-  return `<div class="card jobs" id="jobs"><h3>Working on</h3>${state.jobs.map(j => `
-    <div class="job" data-job="${j.id}"><span class="spinner"></span><span>${esc(j.kind)} · ${esc(j.label)}</span>
-    <span class="muted">${esc(j.progress || j.status)}</span></div>`).join("")}</div>`;
+  const open = new Set($$("#jobs details[open]").map(d => d.dataset.kind));  // survive the 1.5 s refresh
+  const running = state.jobs.filter(j => j.status !== "queued"), queued = {};
+  state.jobs.filter(j => j.status === "queued").forEach(j => (queued[j.kind] ||= []).push(j));
+  return `<section class="jobs" id="jobs" aria-label="Background work"><h3>Working on</h3><div class="job-rows">${running.map(j => `
+    <div class="job" data-job="${esc(j.id)}"><span class="sweep" aria-hidden="true"></span><span class="job-what">${esc(jobVerb(j.kind))}</span>
+    <span class="muted job-detail" ${OPAQUE.test(j.label || "") ? "" : `title="${esc(j.label)}"`}>${esc(j.progress || (OPAQUE.test(j.label || "") ? "starting…" : j.label))}</span></div>`).join("")}</div>${
+    Object.entries(queued).map(([k, js]) => {
+      const line = `<span class="still" aria-hidden="true"></span><span class="n">${js.length} more ${esc(JOB_WAIT[k] || `waiting: ${jobVerb(k)}`)}</span>`;
+      // Queued Canvas pulls only know an opaque file id ("drive:1Cjx…"); a list of those helps nobody, so no Show.
+      if (js.every(j => OPAQUE.test(j.label || ""))) return `<div class="job-queue job" data-kind="${esc(k)}">${line}</div>`;
+      return `<details class="job-queue" data-kind="${esc(k)}" ${open.has(k) ? "open" : ""}><summary>${line}</summary>
+    <ul>${js.map(j => `<li data-job="${esc(j.id)}" class="muted">${esc(j.label)}</li>`).join("")}</ul></details>`; }).join("")}</section>`;
+}
+
+// One transcription at a time: a second click would open a second Colab session. A batch row with no
+// ended_at is still running (the CLI's batches don't show up as server jobs); after 4 h assume it crashed.
+const transcribeRunning = ts => state.jobs.some(j => j.kind === "transcribe")
+  || ts.batches.some(b => !b.ended_at && Date.now() - utc(b.started_at) < 4 * 3600e3);
+
+function colabLine(ts, running) {
+  if (!ts.colab_enabled) return "Colab off: transcribing on this laptop’s CPU";
+  if (ts.colab_failures >= 2) return `<span class="err">Colab failed twice, so the laptop CPU is used until it works again</span>`;
+  const last = ts.batches.find(b => b.mode === "colab");
+  if (running) return "Transcription batch running";
+  if (!last) return "Colab GPU (no batches yet)";
+  const units = last.units_after != null ? `, ${last.units_after} units left` : "";
+  if (last.ok) return `Last Colab batch finished on ${esc(last.gpu || "?")}${units}`;
+  const why = last.error || "no error recorded";
+  return `<span class="err" title="${esc(why)}">Last Colab batch failed: ${esc(why.length > 70 ? why.slice(0, 70) + "…" : why)}</span>`;
 }
 
 const views = {
   async library() {
     await loadLectures();
-    const inboxes = await api("/api/inboxes");
-    return `<div class="row spread"><h2>Library</h2></div>${jobsPanel()}${lectureList(state.lectures)}
-      <p class="small muted">Inbox folders (drop a file into the course's subfolder and it's picked up within a minute):<br>
-      ${inboxes.map(i => `<code class="path">${esc(i.path)}\\&lt;COURSE&gt;\\</code> <span>${i.kind === "drive" ? "Google Drive" : "local"}</span>`).join("<br>")}</p>`;
+    const [inboxes, ts, jobs] = await Promise.all([api("/api/inboxes"), api("/api/transcribe/status"), api("/api/jobs")]);
+    state.jobs = jobs;
+    const running = transcribeRunning(ts);
+    return `<div class="page-head"><h2>Library</h2><div class="row">
+        <span class="small muted" id="colab-line">${colabLine(ts, running)}</span>
+        <button id="tr-queued" ${ts.queued && !running ? "" : "disabled"}>${running ? "Transcribing…"
+          : ts.queued ? `Transcribe ${ts.queued} waiting` : "Nothing waiting to transcribe"}</button></div></div>
+      ${jobsPanel()}${lectureList(state.lectures, null, inboxes)}
+      <section class="inboxes"><h3>Inbox folders</h3>
+        <p class="hint">Drop a file into the course’s subfolder and it’s picked up within a minute.</p>
+        ${inboxes.map(i => `<div class="inbox"><code class="path">${esc(i.path)}\\&lt;COURSE&gt;\\</code>
+          <span class="small muted">${i.kind === "drive" ? "Google Drive" : "This laptop"}</span></div>`).join("")}</section>`;
   },
   async courses() {
-    return `<h2>Courses &amp; vocabulary</h2>
-      <p class="muted small">One term per line: names, jargon, function names. These are fed to Whisper and to the note prompts so technical terms come out right.</p>
+    if (!state.courses.length) return `<div class="page-head"><h2>Courses &amp; vocabulary</h2></div>
+      <div class="empty"><h3>No courses found</h3><p>The server creates your courses the first time it starts.
+        Check server.log for a database error, then restart it with <code>lecturelab serve</code>.</p>
+        <button type="button" data-retry>Try again</button></div>`;
+    return `<div class="page-head"><h2>Courses &amp; vocabulary</h2></div>
+      <p class="lede">One term per line: names, jargon, function names. These are fed to Whisper and to the note prompts so technical terms come out right.</p>
       <div class="grid2">${state.courses.map(c => `
-        <div class="card" data-course="${c.id}">
-          <div class="row" style="margin-bottom:8px"><b>${esc(c.code)}</b>
-            <input class="course-name" value="${esc(c.name)}" style="flex:1" aria-label="Course name"></div>
-          <textarea class="course-vocab" aria-label="${esc(c.code)} vocabulary">${esc(c.vocabulary)}</textarea>
-          <div class="row spread" style="margin-top:8px">
-            <span class="small muted term-count">${c.vocabulary ? c.vocabulary.split("\n").length : 0} terms</span>
-            <button class="save-course">Save</button></div>
-        </div>`).join("")}</div>`;
+        <section data-course="${c.id}" style="display:grid;gap:12px">
+          <div class="row" style="flex-wrap:nowrap"><span class="code" style="font-size:var(--t-l)">${esc(c.code)}</span>
+            <input class="course-name" name="course-name" autocomplete="off" value="${esc(c.name)}" aria-label="Course name"></div>
+          <textarea class="course-vocab" spellcheck="false" aria-label="${esc(c.code)} vocabulary"
+            placeholder="One term per line, for example:&#10;Dijkstra&#10;B-tree&#10;malloc">${esc(c.vocabulary)}</textarea>
+          <div class="row spread">
+            <span class="small muted term-count">${termCount(c.vocabulary)}</span>
+            <button class="save-course ghost">Save vocabulary</button></div>
+        </section>`).join("")}</div>`;
   },
   async course(id) {
     const c = state.courses.find(c => c.id == id);
-    if (!c) return `<h2>Not found</h2>`;
-    await loadLectures();
-    return `<h2>${esc(c.code)} · ${esc(c.name)}</h2>${jobsPanel()}${lectureList(state.lectures.filter(l => l.course_id == id))}`;
+    if (!c) throw Object.assign(new Error("course not found"), { status: 404 });
+    const [, inboxes] = await Promise.all([loadLectures(), api("/api/inboxes")]);
+    return `<div class="page-head"><div><h2>${esc(c.name)}</h2><p class="sub"><span class="code">${esc(c.code)}</span></p></div></div>
+      ${jobsPanel()}${lectureList(state.lectures.filter(l => l.course_id == id), c, inboxes)}`;
   },
   async lecture(id) {
     const l = await api(`/api/lectures/${id}`);
     const media = l.video_path
       ? `<video id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/video"></video>`
       : `<audio id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/audio"></audio>`;
-    const dup = l.status === "duplicate" ? `<div class="card banner" id="dup-banner">
-        This looks like the same recording as <a href="#/lecture/${l.dup_of}">lecture ${l.dup_of}</a>, so it won't be processed.
-        <div class="row" style="margin-top:8px"><button id="not-dup">Not a duplicate</button>
+    const dup = l.status === "duplicate" ? `<div class="banner" id="dup-banner">
+        This looks like the same recording as <a href="#/lecture/${l.dup_of}">lecture ${l.dup_of}</a>, so it won’t be processed.
+        <div class="row" style="margin-top:12px"><button id="not-dup">Not a duplicate</button>
         <button class="danger" id="del-dup">Delete this copy</button></div></div>` : "";
-    const err = l.status === "error" ? `<div class="card banner bad"><b>Error:</b> ${esc(l.error)}</div>` : "";
-    return `<div class="row spread"><h2 id="lec-title">${esc(l.title)}</h2>${chip(l.status)}</div>${dup}${err}
-      <div class="card">${media}</div>
-      <div class="card" id="lec-meta"><div class="form3">
-        <label class="field">Title <input id="m-title" value="${esc(l.title)}"></label>
-        <label class="field">Course <select id="m-course">${courseOptions(l.course_id)}</select></label>
-        <label class="field">Date <input id="m-date" type="date" value="${esc(l.date || "")}"></label></div>
-        <div class="row spread" style="margin-top:10px"><span class="small muted">${fmtDur(l.duration_sec)} · ${l.video_path ? "video + audio" : "audio only"}</span>
-        <button id="m-save">Save</button></div></div>
-      <div class="card"><h3>Sources</h3>${l.sources.map(s => `<div class="small" data-source="${esc(s.kind)}"><span class="chip">${esc(s.kind)}</span>
-        <code class="path">${esc(s.url)}</code> <span class="muted">${esc(s.added_at)}</span></div>`).join("")}</div>
-      <div class="row spread"><span></span><button class="danger" id="del-lec">Delete lecture</button></div>`;
+    const err = l.status === "error" ? `<div class="banner bad"><b>Error:</b> ${esc(l.error)}</div>` : "";
+    const [segs, ts, jobs] = await Promise.all([l.segment_count ? api(`/api/lectures/${l.id}/segments`) : [],
+      api("/api/transcribe/status"), api("/api/jobs")]);
+    state.jobs = jobs;
+    const busy = transcribeRunning(ts) ? "disabled" : "";
+    const canTranscribe = l.status !== "transcribing"
+      && (["queued_transcribe", "error"].includes(l.status) || l.transcript_source === "v1");
+    const tbtns = canTranscribe ? `${busy ? `<span class="small muted">A transcription batch is running; these unlock when it finishes.</span>` : ""}
+        <button id="tr-auto" ${busy}>Transcribe (Colab GPU)</button>
+        <button class="ghost" id="tr-local" ${busy}>Transcribe locally</button>` : "";
+    const srcNote = l.transcript_source === "v1" ? "Old v1 transcript (Whisper base): a large-v3 transcript replaces it once transcribed"
+      : l.transcript_source ? `by ${esc(l.transcript_source)}` : "";
+    const course = state.courses.find(c => c.id == l.course_id);
+    return `<div class="page-head"><div><h2 id="lec-title">${esc(l.title)}</h2>
+        <p class="sub">${course ? `<span class="code">${esc(course.code)}</span>` : ""}<span>${esc(fmtDate(l.date))}</span>
+          <span class="num">${l.duration_sec ? fmtTs(l.duration_sec) : ""}</span></p></div>${chip(l.status)}</div>${dup}${err}
+      <div class="player">${media}</div>
+      ${scrubber(l, segs)}
+      <p class="hint keys">Keys: K plays or pauses, J and L skip 10 seconds. Click the tape or a timestamp to jump there.</p>
+      <section class="sec" id="transcript-card"><div class="sec-head"><div><h3>Transcript</h3>
+        <p class="hint" id="tr-source" style="margin-top:4px">${srcNote}</p></div><div class="row">${tbtns}</div></div>
+        ${segs.length ? `<div id="transcript">${segs.map(s => `<p class="seg" data-start="${s.start}" data-end="${s.end}"><button type="button"
+          class="ts" data-seek="${s.start}" aria-label="Play from ${fmtTs(s.start)}">${fmtTs(s.start)}</button><span>${esc(s.text)}</span></p>`).join("")}</div>`
+          : `<p class="muted" id="no-transcript">${l.status === "transcribing" ? "Transcribing now. The text appears here when the batch finishes."
+            : canTranscribe ? "Not transcribed yet. Transcribe it on a Colab GPU (fast) or on this laptop (slow, works offline)."
+            : "Not transcribed yet."}</p>`}</section>
+      <section class="sec" id="lec-meta"><div class="sec-head"><h3>Details</h3></div><div class="form3">
+        <label class="field">Title <input id="m-title" name="title" autocomplete="off" value="${esc(l.title)}"></label>
+        <label class="field">Course <select id="m-course" name="course">${courseOptions(l.course_id)}</select></label>
+        <label class="field">Date <input id="m-date" name="date" type="date" value="${esc(l.date || "")}"></label></div>
+        <div class="row spread" style="margin-top:16px"><span class="small muted">${fmtDur(l.duration_sec)}, ${l.video_path ? "video and audio" : "audio only"}</span>
+        <button id="m-save">Save details</button></div></section>
+      <section class="sec"><div class="sec-head"><h3>Sources</h3></div>${l.sources.map(s => `<div class="source small" data-source="${esc(s.kind)}"><span class="chip kind">${esc(s.kind)}</span>
+        <code class="path">${esc(s.url)}</code> <span class="muted">${esc(fmtWhen(s.added_at))}</span></div>`).join("")}</section>
+      <div class="row end sec"><button class="danger" id="del-lec">Delete lecture</button></div>`;
   },
 };
 
 const binders = {
+  library() {
+    $("#tr-queued").onclick = async () => {
+      const r = await api("/api/transcribe", { method: "POST", body: { mode: "auto" } });
+      toast(r.note || "Transcribing everything waiting in one Colab batch…");
+      watchJob(r.job_id, true).then(j => { if (j.status === "done") toast(`Transcribed ${j.result.transcribed.length} lecture(s) (${j.result.mode})`, 6000); render(); });
+      render();
+    };
+  },
   courses() {
     $$(".save-course").forEach(btn => btn.onclick = async () => {
       const card = btn.closest("[data-course]");
@@ -240,7 +559,8 @@ const binders = {
       // Update just this card so unsaved edits in the other cards survive.
       $(".course-vocab", card).value = saved.vocabulary;
       $(".course-name", card).value = saved.name;
-      $(".term-count", card).textContent = `${saved.vocabulary ? saved.vocabulary.split("\n").length : 0} terms`;
+      $(".term-count", card).textContent = termCount(saved.vocabulary);
+      dirty.delete(`course-${card.dataset.course}`); btn.classList.add("ghost");
       await loadCourses();
       toast("Saved");
     });
@@ -250,58 +570,248 @@ const binders = {
       const l = await api(`/api/lectures/${id}`, { method: "PATCH", body: {
         title: $("#m-title").value, date: $("#m-date").value || null, course_id: $("#m-course").value ? +$("#m-course").value : null } });
       $("#lec-title").textContent = l.title;
+      dirty.delete("meta");
       toast("Saved");
     };
-    const del = async () => { if (confirm("Delete this lecture and its files?")) {
-      await api(`/api/lectures/${id}`, { method: "DELETE" }); toast("Deleted"); location.hash = "#/"; } };
+    const del = async () => {
+      if (!await confirmDanger("Delete this lecture?",
+        "This removes the lecture, its transcript and its files from LectureLab. It can’t be undone.", "Delete lecture")) return;
+      await api(`/api/lectures/${id}`, { method: "DELETE" }); dirty.clear(); toast("Lecture deleted"); location.hash = "#/"; };
     $("#del-lec").onclick = del;
     if ($("#del-dup")) $("#del-dup").onclick = del;
     if ($("#not-dup")) $("#not-dup").onclick = async () => { await api(`/api/lectures/${id}/not-duplicate`, { method: "POST" }); render(); };
     const v = $("video#player");
     if (v) v.onerror = () => { // e.g. an .mkv the browser can't decode: fall back to the normalized audio
-      v.outerHTML = `<audio id="player" controls preload="metadata" src="/api/lectures/${id}/media/audio"></audio>`; };
+      v.outerHTML = `<audio id="player" controls preload="metadata" src="/api/lectures/${id}/media/audio"></audio>`; bindPlayer(); };
+    const startTranscribe = mode => async () => {
+      const { job_id } = await api("/api/transcribe", { method: "POST", body: { lecture_ids: [+id], mode } });
+      toast(mode === "local" ? "Transcribing on this laptop’s CPU…" : "Sending to a Colab GPU…");
+      render();
+      const j = await watchJob(job_id, true);
+      if (j.status === "done") { toast(`Transcribed (${j.result.mode}${j.result.reason ? ": " + j.result.reason : ""})`, 6000); }
+      if (location.hash === `#/lecture/${id}`) render();
+    };
+    if ($("#tr-auto")) $("#tr-auto").onclick = startTranscribe("auto");
+    if ($("#tr-local")) $("#tr-local").onclick = startTranscribe("local");
+    $$("[data-seek]").forEach(a => a.onclick = e => { e.preventDefault(); seek(+a.dataset.seek); });
+    bindPlayer();
   },
 };
 
-let renderSeq = 0;
+// ---- player <-> transcript
+const fmtTs = s => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(sec).padStart(2, "0")}`; };
+// The lecture page's tape: one tick per transcript segment, the played part highlighted, an ink playhead.
+function scrubber(l, segs) {
+  const dur = l.duration_sec || segs.at(-1)?.end || 0;
+  if (!dur) return "";
+  const ticks = segs.map(s => `<rect x="${(s.start / dur * 1000).toFixed(1)}" y="0" height="12"
+    width="${Math.max((s.end - s.start) / dur * 1000, .8).toFixed(1)}"/>`).join("");
+  return `<div class="scrub-wrap"><div class="scrub" id="scrub" data-tape="${tapeState(l.status)}" data-dur="${dur}" role="slider" tabindex="0"
+      aria-label="Seek" aria-valuemin="0" aria-valuemax="${Math.round(dur)}" aria-valuenow="0" aria-valuetext="0:00 of ${fmtTs(dur)}">
+      <div class="scrub-track"><span class="scrub-played"></span>
+        ${ticks ? `<svg viewBox="0 0 1000 12" preserveAspectRatio="none" aria-hidden="true" fill="currentColor">${ticks}</svg>` : ""}</div><span class="scrub-head"></span></div>
+    <span class="num" id="scrub-time">0:00 / ${fmtTs(dur)}</span></div>`;
+}
+function bindScrub(p) {
+  const sc = $("#scrub"); if (!sc) return;
+  const dur = () => p.duration && isFinite(p.duration) ? p.duration : +sc.dataset.dur;
+  const show = t => { const d = dur(), f = Math.min(Math.max(t / d, 0), 1);
+    sc.style.setProperty("--p", f); sc.setAttribute("aria-valuenow", Math.round(t));
+    sc.setAttribute("aria-valuetext", `${fmtTs(t)} of ${fmtTs(d)}`); $("#scrub-time").textContent = `${fmtTs(t)} / ${fmtTs(d)}`; };
+  const at = e => { const r = sc.getBoundingClientRect(); return Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1) * dur(); };
+  sc.onpointerdown = e => { if (e.button !== 0) return; sc.setPointerCapture(e.pointerId); seek(at(e)); };
+  sc.onpointermove = e => { if (sc.hasPointerCapture(e.pointerId)) { p.currentTime = at(e); show(p.currentTime); } };
+  sc.onkeydown = e => {
+    const step = { ArrowLeft: -5, ArrowRight: 5, ArrowDown: -5, ArrowUp: 5, PageDown: -30, PageUp: 30 }[e.key];
+    if (step) p.currentTime = Math.min(Math.max(p.currentTime + step, 0), dur());
+    else if (e.key === "Home") p.currentTime = 0;
+    else if (e.key === "End") p.currentTime = dur();
+    else return;
+    e.preventDefault(); follow = true; show(p.currentTime);
+  };
+  p.addEventListener("timeupdate", () => show(p.currentTime));
+  p.addEventListener("loadedmetadata", () => show(p.currentTime));
+}
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let follow = true;  // keep the current line on screen while the reader is following along
+function seek(t) { const p = $("#player"); if (!p) return; follow = true; p.currentTime = t; p.play().catch(() => {}); }
+function bindPlayer() {
+  const p = $("#player"), segs = $$(".seg");
+  if (!p) return;
+  bindScrub(p);
+  if (!segs.length) return;
+  let cur = null;
+  const inView = el => { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; };
+  p.ontimeupdate = () => {
+    const t = p.currentTime;
+    const hit = segs.find(s => t >= +s.dataset.start && t < +s.dataset.end + 0.3);
+    if (hit && hit !== cur) {
+      // Only scroll if the reader was looking at the previous line; if they scrolled away to read, leave them be.
+      if (cur && !inView(cur)) follow = false;
+      cur?.classList.remove("now"); hit.classList.add("now"); cur = hit;
+      const r = hit.getBoundingClientRect();
+      if (follow && (r.top < 80 || r.bottom > innerHeight - 40))
+        hit.scrollIntoView({ block: "center", behavior: reduceMotion.matches ? "auto" : "smooth" });
+    }
+  };
+}
+
+// ---- loading, error and leave-with-unsaved-changes states
+const sk = (w, h = 14) => `<span class="sk" style="width:${w};height:${h}px"></span>`;
+const listSkeleton = () => `<div class="page-head">${sk("200px", 38)}</div><div class="list">${[72, 54, 80, 46, 63].map(w =>
+  `<div class="lec-sk">${sk(w + "%", 20)}${sk("48px")}<span class="meta">${sk("64px")}${sk(w * 3 + "px", 8)}</span></div>`).join("")}</div>`;
+const skeletons = {
+  library: listSkeleton, course: listSkeleton,
+  courses: () => `<div class="page-head">${sk("320px", 38)}</div><div class="grid2">${[1, 2, 3, 4].map(() =>
+    `<div style="display:grid;gap:12px">${sk("100%", 40)}${sk("100%", 200)}</div>`).join("")}</div>`,
+  lecture: () => `<div class="page-head"><div style="display:grid;gap:12px;width:100%">${sk("60%", 38)}${sk("180px")}</div></div>
+    ${sk("100%", 54)}<div class="scrub-wrap">${sk("100%", 12)}</div>${[88, 64, 92, 51, 77, 69, 83, 45].map(w =>
+    `<p class="seg-sk">${sk("36px", 12)}${sk(w + "%", 18)}</p>`).join("")}`,
+};
+function errorView(key, arg, err) {
+  const what = key === "lecture" ? `lecture ${arg}` : key === "course" ? "this course" : "this page";
+  const [title, body] = err.status === 404
+    ? [`There’s no ${what}`, "It may have been deleted, or the link is out of date."]
+    : err.status ? [`${what.charAt(0).toUpperCase() + what.slice(1)} didn’t load`, `The server said: ${esc(err.message)}. Try again; if it keeps failing, check server.log.`]
+    : ["The server isn’t answering", "LectureLab’s server isn’t running or was restarted. Start it with <code>lecturelab serve</code>, then try again."];
+  const actions = err.status === 404 ? `<a class="btn" href="#/">Back to Library</a>`  // retrying a missing id can't help
+    : `<button type="button" data-retry>Try again</button><a class="btn ghost" href="#/">Back to Library</a>`;
+  return `<div class="empty" data-error role="alert"><h3>${title}</h3><p>${body}</p><div class="row">${actions}</div></div>`;
+}
+function confirmDanger(title, msg, action) {
+  const d = $("#confirm-dlg");
+  $("#confirm-h").textContent = title; $("#confirm-msg").textContent = msg; $("#confirm-ok").textContent = action;
+  d.returnValue = ""; d.showModal();
+  return new Promise(r => d.addEventListener("close", () => r(d.returnValue === "ok"), { once: true }));
+}
+const dirty = new Set();  // unsaved edits on the current view: "meta" or "course-<id>"
+$("#view").addEventListener("input", e => {
+  const card = e.target.closest("[data-course]");
+  if (card) { dirty.add(`course-${card.dataset.course}`); $(".save-course", card).classList.remove("ghost");
+    if (e.target.matches(".course-vocab")) $(".term-count", card).textContent = termCount(e.target.value); }
+  else if (e.target.closest("#lec-meta")) dirty.add("meta");
+});
+$("#view").addEventListener("click", e => {
+  if (e.target.closest("[data-action=add]")) openAdd();
+  if (e.target.closest("[data-retry]")) { shown = ""; loadCourses().catch(() => {}).then(render); }
+});
+
+let renderSeq = 0, shown = "";
 async function render() {
-  const seq = ++renderSeq;
+  const seq = ++renderSeq, view = $("#view");
   let [, route = "", arg] = location.hash.slice(1).split("/");
   if (arg !== undefined && !/^\d+$/.test(arg)) { route = ""; arg = undefined; }  // ids only: never echo the hash into HTML
-  const key = Object.hasOwn(views, route) ? route : "library";
-  const html = await views[key](arg);
+  if (arg === undefined && (route === "lecture" || route === "course")) route = "";  // these need an id
+  const key = Object.hasOwn(views, route) ? route : "library", where = `${key}/${arg ?? ""}`;
+  $$("aside nav a").forEach(a => a.dataset.route === (arg ? `${key}-${arg}` : key)
+    ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+  // Skeletons only on a real navigation that's slow; background re-renders of the same view swap in place.
+  const skel = where !== shown && setTimeout(() => {
+    if (seq === renderSeq) { view.innerHTML = skeletons[key](); view.setAttribute("aria-busy", "true"); } }, 120);
+  let html, failed = false;
+  try { html = await views[key](arg); }
+  catch (err) { html = errorView(key, arg, err); failed = true; }
+  finally { clearTimeout(skel); }
   if (seq !== renderSeq) return; // a newer navigation won
-  $("#view").innerHTML = html;
-  $$("aside nav a").forEach(a => a.classList.toggle("active", a.dataset.route === (arg ? `${key}-${arg}` : key)));
-  binders[key]?.(arg);
+  // Background re-renders of the same lecture (transcribe start/finish) must not wipe details being typed.
+  const kept = where === shown && dirty.has("meta") ? ["#m-title", "#m-course", "#m-date"].map(s => [s, $(s)?.value]) : [];
+  view.removeAttribute("aria-busy");
+  view.innerHTML = html;
+  kept.forEach(([s, v]) => { if ($(s) && v != null) $(s).value = v; });
+  shown = failed ? "" : where;
+  if (!failed) binders[key]?.(arg);
 }
 
 // ---- Add recording dialog
 let addTab = "file", addFile = null;
-function openAdd() {
+// Client-side checks show next to the field and take focus; server errors still arrive as toasts.
+function clearErrors() {
+  $$("#add-dlg .field-error").forEach(e => e.remove());
+  $$("#add-dlg [aria-invalid]").forEach(e => { e.removeAttribute("aria-invalid"); e.removeAttribute("aria-describedby"); });
+}
+function fieldError(el, msg, after = el.closest("label.field, .drop") || el) {
+  clearErrors();
+  const id = `err-${el.id || "field"}`;  // Canvas checkboxes have no id
+  el.setAttribute("aria-invalid", "true"); el.setAttribute("aria-describedby", id);
+  after.insertAdjacentHTML("afterend", `<p class="field-error" id="${id}">${esc(msg)}</p>`);
+  el.focus();
+}
+$("#add-form").addEventListener("input", e => { if (e.target.matches("[aria-invalid], #cv-items input")) clearErrors(); });
+// The open dialog and its tab live in ?add=file|link|canvas, so a link reopens it (the hash is the page route).
+const setAddParam = tab => { const u = new URL(location.href);
+  tab ? u.searchParams.set("add", tab) : u.searchParams.delete("add"); history.replaceState(history.state, "", u); };
+let addSession = 0;  // bumps on every open, so a slow upload can't close a dialog that was reopened meanwhile
+async function openAdd(tab = addTab) {
+  if ($("#add-dlg").open) return;
+  if (!state.courses.length) await loadCourses().catch(() => {});  // clicked before the first load finished
+  if ($("#add-dlg").open) return;  // a second press of A while courses loaded
+  addSession++;
+  $("#cv-items").innerHTML = "";
   const cur = location.hash.match(/^#\/course\/(\d+)/);
   $("#add-course").innerHTML = courseOptions(cur ? cur[1] : "", "Choose course…");
-  $("#add-form").reset(); addFile = null; $("#drop-label").innerHTML = $("#drop-label").dataset.orig;
+  $("#add-form").reset(); addFile = null; clearErrors(); $("#drop-label").innerHTML = $("#drop-label").dataset.orig;
+  $("#drop").classList.remove("has-file");
   $("#passcode-field").hidden = true;
+  $("#add-submit").disabled = false;
   $("#add-dlg").showModal();
+  const t = $(`[data-tab="${tab}"]`); t.click(); t.focus();
 }
 $("#drop-label").dataset.orig = $("#drop-label").innerHTML;
-$("#add-btn").onclick = openAdd;
+$("#add-btn").onclick = () => openAdd();
 $("#add-cancel").onclick = () => $("#add-dlg").close();
+$("#add-dlg").addEventListener("close", () => setAddParam(null));
 $$(".tabs button").forEach(b => b.onclick = () => {
-  addTab = b.dataset.tab;
-  $$(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  addTab = b.dataset.tab; clearErrors(); setAddParam(addTab);
+  $$(".tabs button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", x === b); x.tabIndex = x === b ? 0 : -1; });
   $$("[data-pane]").forEach(p => p.hidden = p.dataset.pane !== addTab);
-  $(".form3", $("#add-form")).style.display = addTab === "canvas" ? "none" : "";
-  $("#add-submit").textContent = addTab === "canvas" ? "Pull selected" : "Add";
-  if (addTab === "canvas") { canvasCourseRow(); loadCanvasItems(); }
+  $("#add-meta").hidden = addTab === "canvas";
+  $("#add-submit").textContent = addTab === "canvas" ? "Pull selected" : "Add recording";
+  if (addTab === "canvas") { canvasCourseRow(); loadCanvasItems(); loadCanvasStatus(); }
 });
+
+$(".tabs").onkeydown = e => {  // arrow keys move between tabs, as a tablist should
+  const tabs = $$(".tabs button"), i = tabs.indexOf(document.activeElement);
+  const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+  if (i < 0 || j === undefined) return;
+  e.preventDefault(); const t = tabs[(j + tabs.length) % tabs.length]; t.focus(); t.click();
+};
+
+// ---- Canvas connection (LectureLab's own browser; you sign in there with GatorLink + Duo)
+const CANVAS_LABEL = { connected: "Canvas connected", needs_signin: "Canvas needs sign-in", not_connected: "Canvas not connected" };
+async function loadCanvasStatus() {
+  const st = await api("/api/canvas/status");
+  const box = $("#cv-status");
+  const html = `<span data-canvas-state="${esc(st.state)}" style="flex:1;min-width:0">
+      <b>${esc(CANVAS_LABEL[st.state] || st.state)}</b>${st.user ? ` as ${esc(st.user)}` : ""}
+      <br><span class="small muted">${st.state === "connected" ? "Reads Canvas the way its web pages do. Your password is never stored."
+        : "Opens a separate LectureLab browser: sign in there with GatorLink and Duo. Inbox folders work either way."}</span></span>
+    <button type="button" class="${st.state === "connected" ? "ghost" : ""}" id="cv-connect" ${st.browser_busy ? "disabled" : ""}>
+      ${st.browser_busy ? "Browser open…" : st.state === "connected" ? "Reconnect" : "Connect Canvas"}</button>`;
+  // The heartbeat calls this every 15 s: only swap the markup when it changed, so focus and clicks survive.
+  if (box && box.dataset.last !== html) { box.innerHTML = html; box.dataset.last = html; }
+  if ($("#cv-connect")) $("#cv-connect").onclick = connectCanvas;
+  const badge = $("#canvas-badge");
+  badge.hidden = st.state !== "needs_signin";
+  badge.onclick = () => openAdd("canvas");
+  return st;
+}
+async function connectCanvas() {
+  await api("/api/canvas/connect", { method: "POST" });
+  toast("A LectureLab browser window opened: sign in to Canvas there", 6000);
+  for (let i = 0; i < 200; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const st = await loadCanvasStatus();
+    if (st.state === "connected" && !st.browser_busy) { toast(`Canvas connected as ${st.user}`); return; }
+    if (!st.browser_busy && i > 3) { toast("Sign-in window closed before Canvas connected"); return; }
+  }
+}
 
 // ---- Canvas tab: the course picker sits above the list, reusing the dialog's course select
 function canvasCourseRow() {
   const pane = $("[data-pane=canvas]");
-  if (!$("#cv-course", pane)) pane.insertAdjacentHTML("afterbegin",
-    `<label class="field">Course <select id="cv-course">${courseOptions($("#add-course").value, "Choose course…")}</select></label>`);
+  if (!$("#cv-course", pane)) pane.insertAdjacentHTML("afterbegin", `<label class="field">Course <select id="cv-course"></select></label>`);
+  $("#cv-course").innerHTML = courseOptions($("#add-course").value, "Choose course…");  // rebuilt each time: courses and context change
   $("#cv-course").onchange = () => loadCanvasItems();
 }
 async function loadCanvasItems() {
@@ -311,17 +821,18 @@ async function loadCanvasItems() {
   $("#cv-auto").checked = !!c?.auto_pull;
   const items = await api(`/api/canvas/items?course_id=${id}`);
   box.innerHTML = items.length ? items.map(it => `
-    <label class="row" style="gap:8px;padding:4px 0;border-bottom:1px solid var(--line)" data-cv="${esc(it.key)}">
-      <input type="checkbox" value="${esc(it.key)}" style="width:auto" ${["pulled", "queued"].includes(it.status) ? "disabled" : ""}>
-      <span class="chip">${esc(it.kind)}</span><span style="flex:1">${esc(it.title || it.key)}<br>
+    <label data-cv="${esc(it.key)}">
+      <input type="checkbox" value="${esc(it.key)}" ${["pulled", "queued"].includes(it.status) ? "disabled" : ""}>
+      <span class="chip kind">${esc(it.kind)}</span><span style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(it.title || it.key)}<br>
       <span class="muted">${esc(it.page_url || "")} ${esc((it.created_at || "").slice(0, 10))}</span>
-      ${it.error ? `<br><span style="color:var(--bad)">${esc(it.error)}</span>` : ""}</span>
+      ${it.error ? `<br><span class="err">${esc(it.error)}</span>` : ""}</span>
       <span class="chip ${it.status === "pulled" ? "ok" : it.status === "error" ? "bad" : ""}">${esc(it.status)}</span></label>`).join("")
     : `<p class="muted">Nothing found yet. Press <b>Scan Canvas</b>.</p>`;
 }
 $("#cv-scan").onclick = async () => {
   const id = $("#cv-course")?.value;
-  if (!id) return toast("Choose a course first");
+  if (!id) return fieldError($("#cv-course"), "Choose a course to scan.");
+  clearErrors();
   const btn = $("#cv-scan"); btn.disabled = true; btn.textContent = "Scanning…";
   try {
     const { job_id } = await api(`/api/canvas/scan/${id}`, { method: "POST" });
@@ -337,58 +848,86 @@ $("#cv-auto").onchange = async e => {
   await loadCourses(); toast(e.target.checked ? "Auto-pull on" : "Auto-pull off");
 };
 $("#add-url").oninput = e => { $("#passcode-field").hidden = !/zoom\.(us|com)/i.test(e.target.value); };
-const pickFile = f => { addFile = f; $("#drop-label").textContent = `${f.name} (${(f.size / 1e6).toFixed(1)} MB)`; };
+const pickFile = f => { addFile = f; clearErrors(); $("#drop").classList.add("has-file");
+  $("#drop-label").innerHTML = `<strong>${esc(f.name)}</strong><span class="small">${
+    new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(f.size / 1e6)}&nbsp;MB. Click to choose a different file.</span>`; };
 $("#add-file").onchange = e => e.target.files[0] && pickFile(e.target.files[0]);
 const drop = $("#drop");
-drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
-drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); e.dataTransfer.files[0] && pickFile(e.dataTransfer.files[0]); };
+let dragDepth = 0;  // enter/leave fire for every child the pointer crosses
+drop.ondragenter = e => { e.preventDefault(); dragDepth++; drop.classList.add("over"); };
+drop.ondragover = e => e.preventDefault();
+drop.ondragleave = () => { if (--dragDepth <= 0) { dragDepth = 0; drop.classList.remove("over"); } };
+drop.ondrop = e => { e.preventDefault(); dragDepth = 0; drop.classList.remove("over"); e.dataTransfer.files[0] && pickFile(e.dataTransfer.files[0]); };
 
 $("#add-form").onsubmit = async e => {
   e.preventDefault();
   const course_id = $("#add-course").value, title = $("#add-title").value.trim(), date = $("#add-date").value;
-  const btn = $("#add-submit"); btn.disabled = true;
+  const btn = $("#add-submit"), session = addSession; btn.disabled = true;
+  const done = () => { if (session === addSession) $("#add-dlg").close(); };
   try {
     let r;
     if (addTab === "canvas") {
       const keys = $$("#cv-items input:checked").map(i => i.value);
-      if (!keys.length) throw new Error("Tick the recordings to pull");
+      if (!$("#cv-course").value) return fieldError($("#cv-course"), "Choose a course, then scan it for recordings.");
+      if (!keys.length) {
+        const first = $("#cv-items input:not(:disabled)");
+        return first ? fieldError(first, "Tick the recordings to pull.", $("#cv-items"))
+          : fieldError($("#cv-scan"), "Nothing to pull yet. Scan Canvas to find recordings.", $("#cv-items"));
+      }
+      btn.textContent = "Pulling…";
       const { job_ids } = await api("/api/canvas/pull", { method: "POST", body: { course_id: +$("#cv-course").value, keys } });
-      $("#add-dlg").close();
+      done();
       toast(`Pulling ${job_ids.length} recording(s) from Canvas`);
       job_ids.forEach(id => watchJob(id));
-      return render();
+      if (!dirty.size) render();
+      return;
     }
     if (addTab === "file") {
-      if (!addFile) throw new Error("Choose a file first");
+      if (!addFile) return fieldError($("#add-file"), "Choose a recording file, or drop one onto the box.");
       const fd = new FormData(); fd.append("file", addFile);
       if (course_id) fd.append("course_id", course_id); if (title) fd.append("title", title); if (date) fd.append("date", date);
       btn.textContent = "Uploading…";
       r = await api("/api/recordings/upload", { method: "POST", body: fd });
     } else {
       const url = $("#add-url").value.trim();
-      if (!url) throw new Error("Paste a link first");
+      if (!url) return fieldError($("#add-url"), "Paste the recording’s link.");
+      btn.textContent = "Adding…";
       r = await api("/api/recordings", { method: "POST", body: { url, course_id: course_id ? +course_id : null,
         title: title || null, date: date || null, passcode: $("#add-passcode").value.trim() || null } });
     }
-    $("#add-dlg").close();
+    done();
     toast("Added: processing in the background");
     watchJob(r.job_id);
-    if (!/^#\/(course\/\d+)?$/.test(location.hash) && location.hash !== "") location.hash = "#/"; else render();
+    // Show the new lecture in the list, unless that would throw away details being edited on this page.
+    if (!dirty.size) { if (!/^#\/(course\/\d+)?$/.test(location.hash) && location.hash !== "") location.hash = "#/"; else render(); }
   } catch (err) { toast(err.message, 5000); }
-  finally { btn.disabled = false; btn.textContent = addTab === "canvas" ? "Pull selected" : "Add"; }
+  finally { if (session === addSession) { btn.disabled = false; btn.textContent = addTab === "canvas" ? "Pull selected" : "Add recording"; } }
 };
 
 // ---- background job polling
+// Update the panel in place: swapping it wholesale every 1.5 s ate clicks on "Show" and dropped keyboard focus.
+function patchJobs(panel) {
+  const next = document.createRange().createContextualFragment(jobsPanel()).firstElementChild;
+  const kinds = el => $$(".job-queue", el).map(d => d.tagName + d.dataset.kind).join();
+  if (kinds(panel) !== kinds(next)) return panel.replaceWith(next);  // a whole queue appeared or emptied
+  const sync = (a, b) => { if (a && b && a.innerHTML !== b.innerHTML) a.innerHTML = b.innerHTML; };
+  sync($(".job-rows", panel), $(".job-rows", next));
+  $$(".job-queue", next).forEach(d => {
+    const cur = $(`.job-queue[data-kind="${CSS.escape(d.dataset.kind)}"]`, panel);
+    sync($(".n", cur), $(".n", d)); sync($("ul", cur), $("ul", d));
+  });
+}
 async function pollJobs() {
-  const before = state.jobs.length;
-  state.jobs = await api("/api/jobs");
-  const onList = /^(#\/?)?$|^#\/course\//.test(location.hash);
-  if (onList && (before || state.jobs.length)) {
-    const panel = $("#jobs");
-    if (state.jobs.length && panel) panel.outerHTML = jobsPanel();
-    else render();
-  }
+  try {
+    const before = state.jobs.length;
+    state.jobs = await api("/api/jobs");
+    const onList = /^(#\/?)?$|^#\/course\//.test(location.hash);
+    if (onList && (before || state.jobs.length)) {
+      const panel = $("#jobs");
+      if (state.jobs.length && panel) patchJobs(panel);
+      else render();
+    }
+  } catch {}  // server restarting: the heartbeat says so; keep polling
   setTimeout(pollJobs, state.jobs.length ? 1500 : 5000);
 }
 async function watchJob(id, quiet = false) {
@@ -411,13 +950,39 @@ async function watchJob(id, quiet = false) {
 }
 
 async function heartbeat() {
-  try { const h = await api("/api/health"); $("#health").textContent = `server v${h.version} · ok`; }
-  catch { $("#health").textContent = "server unreachable"; }
+  const h$ = $("#health");
+  try { const h = await api("/api/health"); h$.textContent = `Server ok, v${h.version}`; h$.classList.remove("down"); await loadCanvasStatus();
+    // A batch started from the CLI isn't a server job, so nothing else re-renders when it finishes: re-check here,
+    // and only re-render once it's over and nothing is playing (a re-render rebuilds the player).
+    if ($("#tr-queued")?.textContent === "Transcribing…" || $("#tr-auto")?.disabled) {
+      const [ts, jobs] = await Promise.all([api("/api/transcribe/status"), api("/api/jobs")]);
+      state.jobs = jobs;
+      if (!transcribeRunning(ts) && ($("#player")?.paused ?? true)) render();
+    } }
+  catch { h$.textContent = "Server unreachable: run lecturelab serve"; h$.classList.add("down"); }
 }
 
-window.addEventListener("hashchange", render);
+$("#skip").onclick = () => $("#view").focus();
+let here = location.hash;
+window.addEventListener("hashchange", () => {
+  if (dirty.size && !confirm("You have unsaved changes on this page. Leave without saving them?")) {
+    history.replaceState(null, "", here || "#/"); return; }
+  dirty.clear(); here = location.hash; render();
+});
+window.addEventListener("beforeunload", e => { if (dirty.size) e.preventDefault(); });
+// Shortcuts for the most frequent actions. Ignored while typing, with a modifier, or with a dialog open.
+document.addEventListener("keydown", e => {
+  if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented || $("dialog[open]")) return;
+  if (e.target.closest("input, textarea, select, [contenteditable], video, audio")) return;  // native players handle their own keys
+  const p = $("#player"), k = e.key.toLowerCase();
+  if (k === "a") { e.preventDefault(); openAdd(); }
+  else if (p && k === "k") { e.preventDefault(); p.paused ? p.play().catch(() => {}) : p.pause(); }
+  else if (p && (k === "j" || k === "l")) { e.preventDefault(); p.currentTime = Math.max(p.currentTime + (k === "j" ? -10 : 10), 0); }
+});
 window.addEventListener("unhandledrejection", e => { toast("Error: " + (e.reason?.message || e.reason), 5000); });
-(async () => { await loadCourses(); await render(); heartbeat(); setInterval(heartbeat, 15000); pollJobs(); })();
+(async () => { await loadCourses().catch(() => {}); await render(); heartbeat(); setInterval(heartbeat, 15000); pollJobs();
+  const tab = new URL(location.href).searchParams.get("add");
+  if (["file", "link", "canvas"].includes(tab)) openAdd(tab); else if (tab !== null) setAddParam(null); })();
 </script>
 </body>
 </html>
