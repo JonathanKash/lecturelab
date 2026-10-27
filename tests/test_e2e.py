@@ -41,8 +41,10 @@ def wait_health(predicate=lambda h: True, seconds=30):
 @pytest.fixture(scope="session")
 def server(tmp_path_factory):
     data = tmp_path_factory.mktemp("lldata")
+    # Inboxes point at temp folders: the real Drive inbox must never be touched by tests.
     env = {**os.environ, "LECTURELAB_DATA": str(data), "LECTURELAB_PORT": str(PORT),
-           "LECTURELAB_LOG": str(data / "server.log")}
+           "LECTURELAB_LOG": str(data / "server.log"), "LECTURELAB_INBOX": str(data / "inbox"),
+           "LECTURELAB_DRIVE_INBOX": str(data / "drive_inbox"), "LECTURELAB_INBOX_INTERVAL": "1"}
     assert health() is None, f"port {PORT} already in use"
     # pythonw + supervise is exactly how the logon task runs it: hidden, restarting on crash.
     sup = subprocess.Popen([str(PYTHONW), str(ROOT / "cli.py"), "supervise"], cwd=ROOT, env=env)
@@ -68,6 +70,27 @@ def page(browser, server):
     yield pg
     ctx.close()
     assert not errors, f"JS errors: {errors}"
+
+
+FIXTURE = ROOT / "data" / "fixtures" / "plc_lecture1_8min.webm"  # real class recording, gitignored
+needs_fixture = pytest.mark.skipif(not FIXTURE.exists(), reason="real lecture clip not present in data/fixtures")
+
+
+def api(path, method="GET", body=None):
+    req = urllib.request.Request(BASE + path, method=method, data=json.dumps(body).encode() if body else None,
+                                 headers={"Content-Type": "application/json"} if body else {})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
+def wait_for(fn, seconds=120, every=0.5, what="condition"):
+    end = time.time() + seconds
+    while time.time() < end:
+        v = fn()
+        if v:
+            return v
+        time.sleep(every)
+    raise AssertionError(f"timed out waiting for {what}")
 
 
 def test_ui_lists_courses_and_vocab_persists(page):
@@ -106,6 +129,79 @@ def test_api_rejects_foreign_host_and_unknown_course(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(req)
     assert e.value.code == 404
+
+
+@needs_fixture
+def test_upload_real_lecture_then_play_and_edit(page):
+    page.goto(BASE + "/")
+    page.click("#add-btn")
+    page.set_input_files("#add-file", str(FIXTURE))
+    page.select_option("#add-course", label="COP4020 · Programming Language Concepts")
+    page.fill("#add-title", "PLC Lecture 1 (first 8 min)")
+    page.fill("#add-date", "2026-08-21")
+    page.click("#add-submit")
+    expect(page.locator("#toast")).to_contain_text("Ready: lecture", timeout=120_000)
+    row = page.locator(".lec", has_text="PLC Lecture 1 (first 8 min)")
+    expect(row).to_contain_text("COP4020")
+    expect(row.locator("[data-status]")).to_have_attribute("data-status", "queued_transcribe")
+    row.click()
+    # The normalized 16 kHz FLAC is served with Range support: duration is right and seeking works.
+    page.wait_for_function("document.querySelector('#player').readyState >= 1")
+    assert abs(page.evaluate("document.querySelector('#player').duration") - 480) < 2
+    page.evaluate("document.querySelector('#player').currentTime = 300")
+    page.wait_for_function("Math.abs(document.querySelector('#player').currentTime - 300) < 1")
+    expect(page.locator("[data-source]")).to_have_count(1)
+    page.fill("#m-title", "PLC Lecture 1 · intro clip")
+    page.click("#m-save")
+    expect(page.locator("#toast")).to_have_text("Saved")
+    page.reload()
+    expect(page.locator("#m-title")).to_have_value("PLC Lecture 1 · intro clip")
+    expect(page.locator("#m-date")).to_have_value("2026-08-21")
+
+
+@needs_fixture
+def test_inbox_drop_of_same_lecture_is_deduped(server, page):
+    before = api("/api/lectures")
+    target = server["data"] / "drive_inbox" / "COP4020" / "copy from drive.webm"
+    wait_for(lambda: target.parent.exists(), 30, what="inbox course folders")  # created by the watcher
+    import shutil
+    shutil.copy(FIXTURE, target)
+    lec_id = before[0]["id"]
+    wait_for(lambda: any(s["kind"] == "drive" for s in api(f"/api/lectures/{lec_id}")["sources"]), 60,
+             what="drive inbox file to be ingested")
+    assert len(api("/api/lectures")) == len(before)  # same lecture, no new row
+    page.goto(f"{BASE}/#/lecture/{lec_id}")
+    expect(page.locator("[data-source=drive]")).to_contain_text("copy from drive.webm")
+
+
+@needs_fixture
+def test_reencoded_copy_flagged_and_released(server, page, tmp_path):
+    from lecturelab import find_tool
+    mp3 = tmp_path / "PLC lecture (zoom export).mp3"
+    subprocess.run([find_tool("ffmpeg"), "-v", "error", "-i", str(FIXTURE), "-ss", "4", "-c:a", "libmp3lame",
+                    "-b:a", "48k", str(mp3)], check=True)  # re-encoded AND trimmed 4 s, like another source would be
+    page.goto(BASE + "/")
+    page.click("#add-btn")
+    page.set_input_files("#add-file", str(mp3))
+    page.click("#add-submit")
+    expect(page.locator("#toast")).to_contain_text("Possible duplicate of lecture", timeout=120_000)
+    row = page.locator(".lec", has_text="PLC lecture (zoom export)")
+    expect(row.locator("[data-status]")).to_have_attribute("data-status", "duplicate")
+    row.click()
+    expect(page.locator("#dup-banner")).to_contain_text("same recording as")
+    page.click("#not-dup")
+    expect(page.locator("[data-status]").first).to_have_attribute("data-status", "queued_transcribe")
+
+
+def test_bad_link_reports_the_real_error(page):
+    page.goto(BASE + "/")
+    page.click("#add-btn")
+    page.click("[data-tab=link]")
+    page.fill("#add-url", "https://zoom.us/rec/share/this-recording-does-not-exist")
+    expect(page.locator("#passcode-field")).to_be_visible()
+    page.fill("#add-passcode", "abc123")
+    page.click("#add-submit")
+    expect(page.locator("#toast")).to_contain_text("Failed: yt-dlp:", timeout=90_000)
 
 
 def test_supervisor_restarts_crashed_server(server, page):

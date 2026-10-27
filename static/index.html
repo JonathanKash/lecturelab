@@ -9,12 +9,12 @@
 :root {
   --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e3e1da;
   --accent: #2f6f5e; --accent-ink: #ffffff; --warn: #a15c07; --bad: #b3261e; --ok: #2f6f5e;
-  --code: #f1efe8; --radius: 10px;
+  --chip: #ecebe5; --code: #f1efe8; --radius: 10px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg);
 }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9b9a94; --line: #34332f;
-          --accent: #6fbfa6; --accent-ink: #10201b; --code: #2a2a27; }
+          --accent: #6fbfa6; --accent-ink: #10201b; --chip: #2c2c29; --code: #2a2a27; --warn: #e0a24f; --bad: #f08a80; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
@@ -25,25 +25,54 @@ aside nav a.active, aside nav a:hover { background: var(--bg); }
 aside .section { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 8px; }
 main { padding: 24px 32px; max-width: 1100px; width: 100%; }
 h2 { margin: 0 0 16px; font-size: 22px; }
+h3 { margin: 0 0 10px; font-size: 15px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spread { justify-content: space-between; }
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
-button, .btn { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 14px; cursor: pointer; }
+button, .btn { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 14px; cursor: pointer; text-decoration: none; display: inline-block; }
 button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button.danger { background: transparent; color: var(--bad); border: 1px solid var(--line); }
 button:disabled { opacity: .5; cursor: default; }
 input, textarea, select { font: inherit; font-size: 14px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
 textarea { min-height: 160px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+label.field { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
-.empty { text-align: center; padding: 48px 16px; color: var(--muted); }
-.toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.form3 { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; }
+.empty { text-align: center; padding: 40px 16px; color: var(--muted); }
+.chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+.chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); } .chip.warn { color: var(--warn); }
+.lec { display: grid; grid-template-columns: 90px 1fr auto; gap: 12px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); text-decoration: none; color: inherit; }
+.lec:last-child { border-bottom: 0; }
+.lec:hover { background: var(--bg); }
+.lec .t { font-weight: 550; }
+.list { padding: 0; overflow: hidden; }
+.banner { border-left: 3px solid var(--warn); }
+.banner.bad { border-left-color: var(--bad); }
+.jobs .job { display: flex; gap: 8px; align-items: center; font-size: 13px; padding: 4px 0; }
+.spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+video, audio { width: 100%; border-radius: 8px; background: #000; }
+audio { background: transparent; }
+dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(620px, 94vw); background: var(--panel); color: var(--ink); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog .head { padding: 16px 18px 0; } dialog .body { padding: 14px 18px; display: grid; gap: 12px; } dialog .foot { padding: 0 18px 16px; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-top: 12px; }
+.tabs button { background: transparent; color: var(--muted); border-radius: 0; border-bottom: 2px solid transparent; padding: 8px 12px; }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+.drop { border: 2px dashed var(--line); border-radius: 10px; padding: 24px; text-align: center; color: var(--muted); cursor: pointer; }
+.drop.over { border-color: var(--accent); color: var(--ink); }
+code.path { font-size: 12px; background: var(--code); padding: 2px 6px; border-radius: 4px; word-break: break-all; }
+.toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 480px; }
 .toast.show { opacity: 1; }
-@media (max-width: 760px) { body { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } main { padding: 16px; } }
+@media (max-width: 760px) { body { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } main { padding: 16px; } .form3 { grid-template-columns: 1fr; } .lec { grid-template-columns: 1fr auto; } .lec .d { display: none; } }
 </style>
 </head>
 <body>
 <aside>
   <h1>🎓 LectureLab</h1>
+  <button id="add-btn">＋ Add recording</button>
   <nav id="nav">
     <a href="#/" data-route="library">Library</a>
     <a href="#/courses" data-route="courses">Courses &amp; vocabulary</a>
@@ -54,16 +83,60 @@ textarea { min-height: 160px; font-family: ui-monospace, Consolas, monospace; fo
   <div class="small muted" id="health">connecting…</div>
 </aside>
 <main id="view"></main>
+
+<dialog id="add-dlg">
+  <form method="dialog" id="add-form">
+    <div class="head"><h2 style="margin:0">Add recording</h2>
+      <div class="tabs" role="tablist">
+        <button type="button" data-tab="file" class="on">File</button>
+        <button type="button" data-tab="link">Link</button>
+        <button type="button" data-tab="canvas">Canvas</button>
+      </div>
+    </div>
+    <div class="body">
+      <div data-pane="file">
+        <label class="drop" id="drop">
+          <input type="file" id="add-file" accept=".mp4,.mov,.mkv,.webm,.m4a,.mp3,.wav" hidden>
+          <span id="drop-label">Drop a recording here or click to choose<br><span class="small">mp4, mov, mkv, webm, m4a, mp3, wav</span></span>
+        </label>
+      </div>
+      <div data-pane="link" hidden>
+        <label class="field">Link (Zoom, Google Drive, YouTube, Panopto, Mediasite, Kaltura…)
+          <input id="add-url" type="url" placeholder="https://"></label>
+        <label class="field" id="passcode-field" hidden>Zoom passcode (if the recording has one)
+          <input id="add-passcode" autocomplete="off"></label>
+      </div>
+      <div data-pane="canvas" hidden>
+        <div class="row spread"><span class="small muted">Pick a course below, then scan its Canvas Files, Modules, Pages and Announcements for recordings.</span>
+          <button type="button" class="ghost" id="cv-scan">Scan Canvas</button></div>
+        <label class="small row" style="gap:6px"><input type="checkbox" id="cv-auto" style="width:auto"> Auto-pull new recordings for this course on every sync</label>
+        <div id="cv-items" class="small" style="max-height:260px;overflow:auto"></div>
+      </div>
+      <div class="form3">
+        <label class="field">Title <input id="add-title" placeholder="from the recording"></label>
+        <label class="field">Course <select id="add-course"></select></label>
+        <label class="field">Date <input id="add-date" type="date"></label>
+      </div>
+      <p class="small muted" style="margin:0">Title and date are optional: they come from the source's metadata when it has them.</p>
+    </div>
+    <div class="foot row spread">
+      <button type="button" class="ghost" id="add-cancel">Cancel</button>
+      <button type="submit" id="add-submit">Add</button>
+    </div>
+  </form>
+</dialog>
 <div class="toast" id="toast"></div>
 
 <script>
 const $ = (sel, el = document) => el.querySelector(sel);
+const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const state = { courses: [] };
+const state = { courses: [], lectures: [], jobs: [] };
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts,
-    body: opts.body && typeof opts.body !== "string" && !(opts.body instanceof FormData) ? JSON.stringify(opts.body) : opts.body });
+  const json = opts.body && typeof opts.body !== "string" && !(opts.body instanceof FormData);
+  const res = await fetch(path, { ...opts, headers: json ? { "Content-Type": "application/json" } : {},
+    body: json ? JSON.stringify(opts.body) : opts.body });
   if (!res.ok) {
     const text = await res.text();
     let msg = text || res.statusText;
@@ -72,19 +145,50 @@ async function api(path, opts = {}) {
   }
   return res.headers.get("content-type")?.includes("json") ? res.json() : res.text();
 }
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 2200); }
+function toast(msg, ms = 2600) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), ms); }
+const fmtDur = s => { if (!s) return ""; s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(s % 60).padStart(2, "0")}s`; };
+const STATUS = { queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "warn"],
+  transcribed: ["transcribed", "ok"], aligned: ["aligned", "ok"], notes_queued: ["notes queued", ""],
+  notes_running: ["writing notes", "warn"], notes_done: ["notes ready", "ok"], exported: ["exported", "ok"],
+  duplicate: ["possible duplicate", "warn"], error: ["error", "bad"], waiting_quota: ["waiting for plan limit", "warn"] };
+const chip = st => { const [label, cls] = STATUS[st] || [st, ""]; return `<span class="chip ${cls}" data-status="${esc(st)}">${esc(label)}</span>`; };
+const courseOptions = (sel, blank = "No course") => `<option value="">${blank}</option>` +
+  state.courses.map(c => `<option value="${c.id}" ${c.id == sel ? "selected" : ""}>${esc(c.code)} · ${esc(c.name)}</option>`).join("");
 
 async function loadCourses() {
   state.courses = await api("/api/courses");
   $("#course-nav").innerHTML = state.courses.map(c =>
     `<a href="#/course/${c.id}" data-route="course-${c.id}" title="${esc(c.name)}"><b>${esc(c.code)}</b> <span class="muted">${esc(c.name)}</span></a>`).join("");
 }
+async function loadLectures() { state.lectures = await api("/api/lectures"); }
+
+function lectureList(lectures) {
+  if (!lectures.length) return `<div class="card empty">No lectures yet. Use <b>＋ Add recording</b>, or drop files in an inbox folder.</div>`;
+  return `<div class="card list">${lectures.map(l => `
+    <a class="lec" href="#/lecture/${l.id}" data-lecture="${l.id}">
+      <span class="small muted d">${esc(l.date || "")}</span>
+      <span><span class="t">${esc(l.title)}</span><br><span class="small muted">${esc(l.course_code || "no course")} · ${fmtDur(l.duration_sec)}${l.has_video ? " · video" : ""}</span></span>
+      ${chip(l.status)}
+    </a>`).join("")}</div>`;
+}
+
+function jobsPanel() {
+  if (!state.jobs.length) return "";
+  return `<div class="card jobs" id="jobs"><h3>Working on</h3>${state.jobs.map(j => `
+    <div class="job" data-job="${j.id}"><span class="spinner"></span><span>${esc(j.kind)} · ${esc(j.label)}</span>
+    <span class="muted">${esc(j.progress || j.status)}</span></div>`).join("")}</div>`;
+}
 
 const views = {
-  library() {
-    return `<h2>Library</h2><div class="card empty">No lectures yet.</div>`;
+  async library() {
+    await loadLectures();
+    const inboxes = await api("/api/inboxes");
+    return `<div class="row spread"><h2>Library</h2></div>${jobsPanel()}${lectureList(state.lectures)}
+      <p class="small muted">Inbox folders (drop a file into the course's subfolder and it's picked up within a minute):<br>
+      ${inboxes.map(i => `<code class="path">${esc(i.path)}\\&lt;COURSE&gt;\\</code> <span>${i.kind === "drive" ? "Google Drive" : "local"}</span>`).join("<br>")}</p>`;
   },
-  courses() {
+  async courses() {
     return `<h2>Courses &amp; vocabulary</h2>
       <p class="muted small">One term per line: names, jargon, function names. These are fed to Whisper and to the note prompts so technical terms come out right.</p>
       <div class="grid2">${state.courses.map(c => `
@@ -92,39 +196,218 @@ const views = {
           <div class="row" style="margin-bottom:8px"><b>${esc(c.code)}</b>
             <input class="course-name" value="${esc(c.name)}" style="flex:1" aria-label="Course name"></div>
           <textarea class="course-vocab" aria-label="${esc(c.code)} vocabulary">${esc(c.vocabulary)}</textarea>
-          <div class="row" style="margin-top:8px;justify-content:space-between">
+          <div class="row spread" style="margin-top:8px">
             <span class="small muted term-count">${c.vocabulary ? c.vocabulary.split("\n").length : 0} terms</span>
             <button class="save-course">Save</button></div>
         </div>`).join("")}</div>`;
   },
-  course(id) {
+  async course(id) {
     const c = state.courses.find(c => c.id == id);
     if (!c) return `<h2>Not found</h2>`;
-    return `<h2>${esc(c.code)} · ${esc(c.name)}</h2><div class="card empty">No lectures yet.</div>`;
+    await loadLectures();
+    return `<h2>${esc(c.code)} · ${esc(c.name)}</h2>${jobsPanel()}${lectureList(state.lectures.filter(l => l.course_id == id))}`;
+  },
+  async lecture(id) {
+    const l = await api(`/api/lectures/${id}`);
+    const media = l.video_path
+      ? `<video id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/video"></video>`
+      : `<audio id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/audio"></audio>`;
+    const dup = l.status === "duplicate" ? `<div class="card banner" id="dup-banner">
+        This looks like the same recording as <a href="#/lecture/${l.dup_of}">lecture ${l.dup_of}</a>, so it won't be processed.
+        <div class="row" style="margin-top:8px"><button id="not-dup">Not a duplicate</button>
+        <button class="danger" id="del-dup">Delete this copy</button></div></div>` : "";
+    const err = l.status === "error" ? `<div class="card banner bad"><b>Error:</b> ${esc(l.error)}</div>` : "";
+    return `<div class="row spread"><h2 id="lec-title">${esc(l.title)}</h2>${chip(l.status)}</div>${dup}${err}
+      <div class="card">${media}</div>
+      <div class="card" id="lec-meta"><div class="form3">
+        <label class="field">Title <input id="m-title" value="${esc(l.title)}"></label>
+        <label class="field">Course <select id="m-course">${courseOptions(l.course_id)}</select></label>
+        <label class="field">Date <input id="m-date" type="date" value="${esc(l.date || "")}"></label></div>
+        <div class="row spread" style="margin-top:10px"><span class="small muted">${fmtDur(l.duration_sec)} · ${l.video_path ? "video + audio" : "audio only"}</span>
+        <button id="m-save">Save</button></div></div>
+      <div class="card"><h3>Sources</h3>${l.sources.map(s => `<div class="small" data-source="${esc(s.kind)}"><span class="chip">${esc(s.kind)}</span>
+        <code class="path">${esc(s.url)}</code> <span class="muted">${esc(s.added_at)}</span></div>`).join("")}</div>
+      <div class="row spread"><span></span><button class="danger" id="del-lec">Delete lecture</button></div>`;
   },
 };
 
-function bind() {
-  document.querySelectorAll(".save-course").forEach(btn => btn.onclick = async () => {
-    const card = btn.closest("[data-course]");
-    const saved = await api(`/api/courses/${card.dataset.course}`, { method: "PUT",
-      body: { name: $(".course-name", card).value, vocabulary: $(".course-vocab", card).value } });
-    // Update just this card so unsaved edits in the other cards survive.
-    $(".course-vocab", card).value = saved.vocabulary;
-    $(".course-name", card).value = saved.name;
-    $(".term-count", card).textContent = `${saved.vocabulary ? saved.vocabulary.split("\n").length : 0} terms`;
-    await loadCourses();
-    toast("Saved");
-  });
+const binders = {
+  courses() {
+    $$(".save-course").forEach(btn => btn.onclick = async () => {
+      const card = btn.closest("[data-course]");
+      const saved = await api(`/api/courses/${card.dataset.course}`, { method: "PUT",
+        body: { name: $(".course-name", card).value, vocabulary: $(".course-vocab", card).value } });
+      // Update just this card so unsaved edits in the other cards survive.
+      $(".course-vocab", card).value = saved.vocabulary;
+      $(".course-name", card).value = saved.name;
+      $(".term-count", card).textContent = `${saved.vocabulary ? saved.vocabulary.split("\n").length : 0} terms`;
+      await loadCourses();
+      toast("Saved");
+    });
+  },
+  lecture(id) {
+    $("#m-save").onclick = async () => {
+      const l = await api(`/api/lectures/${id}`, { method: "PATCH", body: {
+        title: $("#m-title").value, date: $("#m-date").value || null, course_id: $("#m-course").value ? +$("#m-course").value : null } });
+      $("#lec-title").textContent = l.title;
+      toast("Saved");
+    };
+    const del = async () => { if (confirm("Delete this lecture and its files?")) {
+      await api(`/api/lectures/${id}`, { method: "DELETE" }); toast("Deleted"); location.hash = "#/"; } };
+    $("#del-lec").onclick = del;
+    if ($("#del-dup")) $("#del-dup").onclick = del;
+    if ($("#not-dup")) $("#not-dup").onclick = async () => { await api(`/api/lectures/${id}/not-duplicate`, { method: "POST" }); render(); };
+    const v = $("video#player");
+    if (v) v.onerror = () => { // e.g. an .mkv the browser can't decode: fall back to the normalized audio
+      v.outerHTML = `<audio id="player" controls preload="metadata" src="/api/lectures/${id}/media/audio"></audio>`; };
+  },
+};
+
+let renderSeq = 0;
+async function render() {
+  const seq = ++renderSeq;
+  let [, route = "", arg] = location.hash.slice(1).split("/");
+  if (arg !== undefined && !/^\d+$/.test(arg)) { route = ""; arg = undefined; }  // ids only: never echo the hash into HTML
+  const key = Object.hasOwn(views, route) ? route : "library";
+  const html = await views[key](arg);
+  if (seq !== renderSeq) return; // a newer navigation won
+  $("#view").innerHTML = html;
+  $$("aside nav a").forEach(a => a.classList.toggle("active", a.dataset.route === (arg ? `${key}-${arg}` : key)));
+  binders[key]?.(arg);
 }
 
-function render() {
-  const [, route = "", arg] = location.hash.slice(1).split("/");
-  const key = route || "library";
-  $("#view").innerHTML = (Object.hasOwn(views, key) ? views[key] : views.library)(arg);
-  document.querySelectorAll("aside nav a").forEach(a =>
-    a.classList.toggle("active", a.dataset.route === (arg ? `${key}-${arg}` : key)));
-  bind();
+// ---- Add recording dialog
+let addTab = "file", addFile = null;
+function openAdd() {
+  const cur = location.hash.match(/^#\/course\/(\d+)/);
+  $("#add-course").innerHTML = courseOptions(cur ? cur[1] : "", "Choose course…");
+  $("#add-form").reset(); addFile = null; $("#drop-label").innerHTML = $("#drop-label").dataset.orig;
+  $("#passcode-field").hidden = true;
+  $("#add-dlg").showModal();
+}
+$("#drop-label").dataset.orig = $("#drop-label").innerHTML;
+$("#add-btn").onclick = openAdd;
+$("#add-cancel").onclick = () => $("#add-dlg").close();
+$$(".tabs button").forEach(b => b.onclick = () => {
+  addTab = b.dataset.tab;
+  $$(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  $$("[data-pane]").forEach(p => p.hidden = p.dataset.pane !== addTab);
+  $(".form3", $("#add-form")).style.display = addTab === "canvas" ? "none" : "";
+  $("#add-submit").textContent = addTab === "canvas" ? "Pull selected" : "Add";
+  if (addTab === "canvas") { canvasCourseRow(); loadCanvasItems(); }
+});
+
+// ---- Canvas tab: the course picker sits above the list, reusing the dialog's course select
+function canvasCourseRow() {
+  const pane = $("[data-pane=canvas]");
+  if (!$("#cv-course", pane)) pane.insertAdjacentHTML("afterbegin",
+    `<label class="field">Course <select id="cv-course">${courseOptions($("#add-course").value, "Choose course…")}</select></label>`);
+  $("#cv-course").onchange = () => loadCanvasItems();
+}
+async function loadCanvasItems() {
+  const id = $("#cv-course")?.value, box = $("#cv-items");
+  if (!id) { box.innerHTML = ""; return; }
+  const c = state.courses.find(c => c.id == id);
+  $("#cv-auto").checked = !!c?.auto_pull;
+  const items = await api(`/api/canvas/items?course_id=${id}`);
+  box.innerHTML = items.length ? items.map(it => `
+    <label class="row" style="gap:8px;padding:4px 0;border-bottom:1px solid var(--line)" data-cv="${esc(it.key)}">
+      <input type="checkbox" value="${esc(it.key)}" style="width:auto" ${["pulled", "queued"].includes(it.status) ? "disabled" : ""}>
+      <span class="chip">${esc(it.kind)}</span><span style="flex:1">${esc(it.title || it.key)}<br>
+      <span class="muted">${esc(it.page_url || "")} ${esc((it.created_at || "").slice(0, 10))}</span>
+      ${it.error ? `<br><span style="color:var(--bad)">${esc(it.error)}</span>` : ""}</span>
+      <span class="chip ${it.status === "pulled" ? "ok" : it.status === "error" ? "bad" : ""}">${esc(it.status)}</span></label>`).join("")
+    : `<p class="muted">Nothing found yet. Press <b>Scan Canvas</b>.</p>`;
+}
+$("#cv-scan").onclick = async () => {
+  const id = $("#cv-course")?.value;
+  if (!id) return toast("Choose a course first");
+  const btn = $("#cv-scan"); btn.disabled = true; btn.textContent = "Scanning…";
+  try {
+    const { job_id } = await api(`/api/canvas/scan/${id}`, { method: "POST" });
+    const j = await watchJob(job_id, true);
+    if (j.status === "done") toast(`Found ${j.result.found} recordings (${j.result.new} new)`);
+    await loadCanvasItems();
+  } catch (err) { toast(err.message, 8000); }
+  finally { btn.disabled = false; btn.textContent = "Scan Canvas"; }
+};
+$("#cv-auto").onchange = async e => {
+  const id = $("#cv-course")?.value; if (!id) return;
+  await api(`/api/courses/${id}/auto-pull`, { method: "PUT", body: { auto_pull: e.target.checked } });
+  await loadCourses(); toast(e.target.checked ? "Auto-pull on" : "Auto-pull off");
+};
+$("#add-url").oninput = e => { $("#passcode-field").hidden = !/zoom\.(us|com)/i.test(e.target.value); };
+const pickFile = f => { addFile = f; $("#drop-label").textContent = `${f.name} (${(f.size / 1e6).toFixed(1)} MB)`; };
+$("#add-file").onchange = e => e.target.files[0] && pickFile(e.target.files[0]);
+const drop = $("#drop");
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); e.dataTransfer.files[0] && pickFile(e.dataTransfer.files[0]); };
+
+$("#add-form").onsubmit = async e => {
+  e.preventDefault();
+  const course_id = $("#add-course").value, title = $("#add-title").value.trim(), date = $("#add-date").value;
+  const btn = $("#add-submit"); btn.disabled = true;
+  try {
+    let r;
+    if (addTab === "canvas") {
+      const keys = $$("#cv-items input:checked").map(i => i.value);
+      if (!keys.length) throw new Error("Tick the recordings to pull");
+      const { job_ids } = await api("/api/canvas/pull", { method: "POST", body: { course_id: +$("#cv-course").value, keys } });
+      $("#add-dlg").close();
+      toast(`Pulling ${job_ids.length} recording(s) from Canvas`);
+      job_ids.forEach(id => watchJob(id));
+      return render();
+    }
+    if (addTab === "file") {
+      if (!addFile) throw new Error("Choose a file first");
+      const fd = new FormData(); fd.append("file", addFile);
+      if (course_id) fd.append("course_id", course_id); if (title) fd.append("title", title); if (date) fd.append("date", date);
+      btn.textContent = "Uploading…";
+      r = await api("/api/recordings/upload", { method: "POST", body: fd });
+    } else {
+      const url = $("#add-url").value.trim();
+      if (!url) throw new Error("Paste a link first");
+      r = await api("/api/recordings", { method: "POST", body: { url, course_id: course_id ? +course_id : null,
+        title: title || null, date: date || null, passcode: $("#add-passcode").value.trim() || null } });
+    }
+    $("#add-dlg").close();
+    toast("Added: processing in the background");
+    watchJob(r.job_id);
+    if (!/^#\/(course\/\d+)?$/.test(location.hash) && location.hash !== "") location.hash = "#/"; else render();
+  } catch (err) { toast(err.message, 5000); }
+  finally { btn.disabled = false; btn.textContent = addTab === "canvas" ? "Pull selected" : "Add"; }
+};
+
+// ---- background job polling
+async function pollJobs() {
+  const before = state.jobs.length;
+  state.jobs = await api("/api/jobs");
+  const onList = /^(#\/?)?$|^#\/course\//.test(location.hash);
+  if (onList && (before || state.jobs.length)) {
+    const panel = $("#jobs");
+    if (state.jobs.length && panel) panel.outerHTML = jobsPanel();
+    else render();
+  }
+  setTimeout(pollJobs, state.jobs.length ? 1500 : 5000);
+}
+async function watchJob(id, quiet = false) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 1500));
+    const j = await api(`/api/jobs/${id}`);
+    if (quiet && ["done", "error"].includes(j.status)) {
+      if (j.status === "error") toast(`Failed: ${j.error}`, 12000);
+      return j;
+    }
+    if (j.status === "done") {
+      const r = j.result.lectures[0];
+      if (/^(#\/?)?$|^#\/course\//.test(location.hash)) await render();  // show the new lecture
+      toast(r.parked_dup_of ? `Possible duplicate of lecture ${r.parked_dup_of} (${r.how}); parked as lecture ${r.lecture_id}`
+        : r.duplicate ? `Already in your library (${r.how}): lecture ${r.lecture_id}` : `Ready: lecture ${r.lecture_id}`, 6000);
+      return j;
+    }
+    if (j.status === "error") { toast(`Failed: ${j.error}`, 12000); return j; }
+  }
 }
 
 async function heartbeat() {
@@ -133,8 +416,8 @@ async function heartbeat() {
 }
 
 window.addEventListener("hashchange", render);
-window.addEventListener("unhandledrejection", e => { toast("Error: " + (e.reason?.message || e.reason)); });
-(async () => { await loadCourses(); render(); heartbeat(); setInterval(heartbeat, 15000); })();
+window.addEventListener("unhandledrejection", e => { toast("Error: " + (e.reason?.message || e.reason), 5000); });
+(async () => { await loadCourses(); await render(); heartbeat(); setInterval(heartbeat, 15000); pollJobs(); })();
 </script>
 </body>
 </html>

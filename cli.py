@@ -106,6 +106,41 @@ def cmd_stop(args) -> int:
     return 1
 
 
+def cmd_add(args) -> int:
+    """Add a recording from a file path or any URL (Zoom, Drive, YouTube, Panopto, ...)."""
+    ll.setup_logging(console=True)
+    course = ll.find_course(args.course)
+    if args.course and not course:
+        print(f"unknown course {args.course!r}; known: {', '.join(c['code'] for c in ll.list_courses())}")
+        return 2
+    payload = {"course_id": course and course["id"], "title": args.title, "date": args.date}
+    if args.source.lower().startswith(("http://", "https://")):
+        payload.update(url=args.source, passcode=args.passcode)
+    else:
+        path = Path(args.source).expanduser().resolve()
+        if not path.is_file():
+            print(f"no such file: {path}")
+            return 2
+        payload.update(path=str(path), kind="file")
+    job = ll.run_job_now(ll.enqueue("ingest", payload))
+    if job["status"] != "done":
+        print(f"FAILED: {job['error']}")
+        return 1
+    for r in job["result"]["lectures"]:
+        lec = ll.get_lecture(r["lecture_id"])
+        tag = f"DUPLICATE ({r['how']}) of" if r["duplicate"] else "added"
+        print(f"{tag} lecture {lec['id']}: {lec['title']} [{lec['course_code'] or 'no course'}] "
+              f"{lec['date']} {lec['duration_sec'] or 0:.0f}s status={lec['status']}")
+    return 0
+
+
+def cmd_import_v1(args) -> int:
+    ll.setup_logging(console=True)
+    for r in ll.import_v1(Path(args.db)):
+        print(r)
+    return 0
+
+
 TASK_SERVER = "LectureLab Server"
 
 
@@ -151,6 +186,16 @@ def main(argv=None) -> int:
     sub.add_parser("serve", help="run the web server in the foreground").set_defaults(fn=cmd_serve)
     sub.add_parser("supervise", help="run the server and restart it if it crashes").set_defaults(fn=cmd_supervise)
     sub.add_parser("stop", help="stop the supervisor and server").set_defaults(fn=cmd_stop)
+    a = sub.add_parser("add", help="add a recording from a file or URL")
+    a.add_argument("source", help="file path or URL")
+    a.add_argument("--course", help="course code or name, e.g. COP4020")
+    a.add_argument("--title")
+    a.add_argument("--date", help="YYYY-MM-DD (default: from the source's metadata)")
+    a.add_argument("--passcode", help="Zoom recording passcode")
+    a.set_defaults(fn=cmd_add)
+    i = sub.add_parser("import-v1", help="one-time import of v1 recordings and transcripts")
+    i.add_argument("db", nargs="?", default=str(Path.home() / "Documents/Projects/lecturelab/lecturelab.db"))
+    i.set_defaults(fn=cmd_import_v1)
     t = sub.add_parser("install-tasks", help="register the Windows logon task")
     t.add_argument("--start", action="store_true", help="also start it now")
     t.set_defaults(fn=cmd_install_tasks)
