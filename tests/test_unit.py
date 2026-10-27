@@ -1275,3 +1275,21 @@ def test_video_slides_wait_for_the_canvas_scan_unless_you_ask(ll, monkeypatch):
         con.execute("DELETE FROM meta WHERE key=?", (f"slides_scanned:{cid}",))
     ll.job_slides(ll.get_job(ll.enqueue_slides(other, ocr=True)))
     assert read == [lid, other]
+
+
+def test_screens_that_are_not_slides_are_left_out(ll, tmp_path):
+    import pymupdf as fitz
+    slide = tmp_path / "slide.png"
+    ll.render_fixed(fitz.open(_pdf(tmp_path / "s.pdf", SLIDE_TEXT[1:2]))[0], 1280, 720).save(slide)
+    doc = fitz.open()  # a desktop: a sidebar, menus and code, lots of small lines
+    p = doc.new_page(width=960, height=540)
+    for i in range(48):
+        p.insert_text((20 + 480 * (i // 24), 20 + 21 * (i % 24)), f"def visit_{i}(self, node): return node.child_{i}",
+                      fontsize=9)
+    desk = tmp_path / "desk.png"
+    ll.render_fixed(doc[0], 1280, 720).save(desk)
+    lines = ll.text_lines(slide, 720)
+    assert ll.looks_like_slide(ll.text_lines(slide, 720, read=False)) and lines
+    assert max(lines, key=lambda ln: ln[1])[0].startswith("Lexical analysis")  # the title is the biggest line
+    assert not ll.looks_like_slide(ll.text_lines(desk, 720, read=False))
+

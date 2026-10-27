@@ -2682,8 +2682,7 @@ _ocr_engine = None
 _ocr_lock = threading.Lock()
 
 
-def ocr_image(path: Path) -> str:
-    """Text in an image, line by line (RapidOCR: pip-installed, runs on the CPU, models bundled)."""
+def _ocr(path: Path, read: bool = True):
     global _ocr_engine
     with _ocr_lock:
         if _ocr_engine is None:
@@ -2691,8 +2690,31 @@ def ocr_image(path: Path) -> str:
             logging.getLogger("RapidOCR").setLevel(logging.WARNING)
             _ocr_engine = RapidOCR(params={"EngineConfig.onnxruntime.intra_op_num_threads": OCR_THREADS,
                                            "EngineConfig.onnxruntime.inter_op_num_threads": 1})
-        res = _ocr_engine(str(path))
+        return _ocr_engine(str(path), use_cls=None if read else False, use_rec=read)
+
+
+def ocr_image(path: Path) -> str:
+    """Text in an image, line by line (RapidOCR: pip-installed, runs on the CPU, models bundled)."""
+    res = _ocr(path)
     return "\n".join(t.strip() for t in (res.txts or ()) if t and t.strip())
+
+
+def text_lines(path: Path, height: int, read: bool = True) -> list[tuple[str, float, float]]:
+    """Each line of text in an image as (text, height, top), height and top as shares of the
+    image's height. read=False only finds the lines (text ""), which is several times faster."""
+    res = _ocr(path, read)
+    boxes = [] if res.boxes is None else list(res.boxes)
+    texts = list(res.txts or ()) if read else [""] * len(boxes)
+    return [(t.strip(), float(b[:, 1].max() - b[:, 1].min()) / height, float(b[:, 1].min()) / height)
+            for b, t in zip(boxes, texts)]
+
+
+def looks_like_slide(lines: list[tuple[str, float, float]]) -> bool:
+    """A slide is a few lines, usually under a big title. A desktop (a browser, an IDE) is a
+    hundred small ones: tabs, menus, a sidebar, the taskbar. On real COP4020 and MIT recordings
+    slides had 3 to 39 lines, browser and IntelliJ screens 46 to 137."""
+    tallest = max((h for _, h, _ in lines), default=0.0)
+    return bool(lines) and (len(lines) <= 30 or (len(lines) <= 45 and tallest >= 0.06))
 
 
 def pptx_to_pdf(src: Path, out_dir: Path) -> Path:
@@ -2913,7 +2935,11 @@ def ocr_video_deck(lec: dict, progress=None) -> int | None:
                  "-frames:v", "1", "-vf", f"scale={FULL_W}:-2", img], timeout=300, low=True)
             if not img.is_file():
                 continue
-            text = ocr_image(img)
+            height = fitz.Pixmap(str(img)).height
+            if not looks_like_slide(text_lines(img, height, read=False)):  # a browser, an IDE: not a slide
+                continue
+            lines = [ln for ln in text_lines(img, height) if ln[0]]
+            text = "\n".join(t for t, _, _ in lines)
             words = set(re.findall(r"[a-z0-9]{3,}", text.lower()))
             if len(words) < 3:
                 continue
@@ -2922,7 +2948,8 @@ def ocr_video_deck(lec: dict, progress=None) -> int | None:
                     k["times"] += s["times"]
                     break
             else:
-                kept.append({"img": img, "text": text, "words": words, "times": s["times"]})
+                title = max(lines, key=lambda ln: (round(ln[1], 2), -ln[2]))[0]  # the biggest line, topmost
+                kept.append({"img": img, "text": text, "title": title, "words": words, "times": s["times"]})
         if len(kept) < 2:
             with db() as con:
                 con.execute("DELETE FROM decks WHERE id=?", (did,))
@@ -2937,7 +2964,7 @@ def ocr_video_deck(lec: dict, progress=None) -> int | None:
     with db() as con:
         con.execute("DELETE FROM slides WHERE deck_id=?", (did,))
         con.executemany("INSERT INTO slides(deck_id, no, title, text, times) VALUES (?,?,?,?,?)",
-                        [(did, no, k["text"].splitlines()[0][:120], k["text"], json.dumps(_merge_times(k["times"])))
+                        [(did, no, k["title"][:120], k["text"], json.dumps(_merge_times(k["times"])))
                          for no, k in enumerate(kept, 1)])
         con.execute("UPDATE decks SET pages=?, thumb_w=?, thumb_h=?, extracted_at=?, status='ready', error=NULL "
                     "WHERE id=?", (len(kept), *size, time.time(), did))
