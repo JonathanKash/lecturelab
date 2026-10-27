@@ -1804,8 +1804,10 @@ def canvas_pull(course_id: int, keys: list[str]) -> list[int]:
         with db() as con:
             n = con.execute("UPDATE canvas_items SET status='queued' WHERE course_id=? AND key=? "
                             "AND status IN ('new','error','ignored')", (course_id, k)).rowcount
+            title = con.execute("SELECT title FROM canvas_items WHERE course_id=? AND key=?", (course_id, k)).fetchone()
         if n:
-            jobs.append(enqueue("canvas_pull", {"course_id": course_id, "key": k}))
+            # The title is only for the jobs list; the job reads the item itself.
+            jobs.append(enqueue("canvas_pull", {"course_id": course_id, "key": k, "title": title and title[0]}))
     return jobs
 
 
@@ -2653,7 +2655,7 @@ def create_app():
                 ids = p.get("lecture_ids")
                 j["label"] = f"{'lecture ' + ', '.join(map(str, ids)) if ids else 'everything waiting'} ({p.get('mode', 'auto')})"
             else:
-                j["label"] = (p.get("url") or p.get("key") or p.get("title") or Path(p.get("path", "")).name
+                j["label"] = (p.get("url") or p.get("title") or p.get("key") or Path(p.get("path", "")).name
                               or (find_course(p.get("course_id")) or {}).get("code", ""))
         return out
 

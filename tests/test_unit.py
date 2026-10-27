@@ -688,3 +688,15 @@ def test_run_error_keeps_stderr_when_stdout_is_binary(ll, monkeypatch):
     with pytest.raises(RuntimeError) as e:
         ll.run(["tool"])
     assert "exit code: 2" in str(e.value) and "abc" not in str(e.value) and "xyz" not in str(e.value)
+
+
+def test_canvas_pull_jobs_are_labelled_with_the_recording_title(ll):
+    from fastapi.testclient import TestClient
+    c = ll.find_course("COP4020")
+    with ll.db() as con:
+        con.execute("INSERT INTO canvas_items(key, course_id, kind, title, url) VALUES "
+                    "('drive:abc', ?, 'drive', 'M2L1 Lexer Introduction', 'u')", (c["id"],))
+    ll.canvas_pull(c["id"], ["drive:abc"])
+    client = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    jobs = client.get("/api/jobs").json()
+    assert [j["label"] for j in jobs if j["kind"] == "canvas_pull"] == ["M2L1 Lexer Introduction"]
