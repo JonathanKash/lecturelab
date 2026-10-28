@@ -2295,3 +2295,9 @@ def test_cli_output_redirected_to_a_file_survives_any_title():
     r = subprocess.run([sys.executable, "-c", "import cli; cli._safe_console(); print('Caf\u00e9 \u2615 lecture')"],
                        capture_output=True, env=env, cwd=os.path.dirname(os.path.dirname(__file__)))
     assert r.returncode == 0, r.stderr
+
+
+def test_a_canvas_page_that_turns_forbidden_keeps_the_pages_before_it(ll):
+    nxt = '<https://ufl.instructure.com/api/v1/courses/1/modules?page=2&per_page=100>; rel="next"'
+    cs, _ = fake_session(ll, [FakeResponse(200, [{"id": 1}], link=nxt), FakeResponse(403, {"errors": []})])
+    assert cs.get("courses/1/modules") == [{"id": 1}]

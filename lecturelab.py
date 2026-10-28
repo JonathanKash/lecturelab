@@ -1572,7 +1572,8 @@ class CanvasSession:
             else:
                 raise CanvasError("Canvas kept rate-limiting; try again in a few minutes.")
             if r.status in (403, 404):
-                return [] if paginate else None  # tab hidden by the instructor, or no access: not an error
+                # tab hidden by the instructor, or no access: not an error (and keep the pages already read)
+                return out if paginate else None
             # Signed out: the API answers 401, or bounces to the SSO login page. Anything else that
             # isn't JSON (a 5xx, a maintenance page) is an outage, not an expired session: it must
             # not flip the sticky "needs sign-in" state.
