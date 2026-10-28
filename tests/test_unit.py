@@ -2271,3 +2271,20 @@ def test_the_cli_runs_a_job_again_once_it_stops_waiting(ll, monkeypatch):
     t.start()
     t.join(15)
     assert out.get("status") == "done" and len(tries) == 2  # no server: the CLI must not wait forever
+
+
+def test_stop_while_the_supervisor_waits_to_restart_starts_no_new_server(ll, monkeypatch, tmp_path):
+    import cli
+    flag = tmp_path / "supervisor.stop"
+    monkeypatch.setattr(cli, "STOP_FLAG", flag)
+    started = []
+
+    class Crashed:
+        pid = 1
+
+        def wait(self):
+            return 1  # the server died at once
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: started.append(1) or Crashed())
+    monkeypatch.setattr(cli.time, "sleep", lambda s: flag.write_text("stop"))  # `lecturelab stop` meanwhile
+    assert cli.cmd_supervise(None) == 0
+    assert len(started) == 1 and not flag.exists()

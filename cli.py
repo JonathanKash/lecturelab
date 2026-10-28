@@ -62,7 +62,14 @@ def cmd_supervise(args) -> int:
             if time.time() - started > 300:
                 backoff = 1  # it ran fine for a while, so this is a fresh crash, not a crash loop
             log.warning("server exited with code %s; restarting in %ss", code, backoff)
-            time.sleep(backoff)
+            for _ in range(backoff * 4):  # `stop` during the wait: don't start a server it can't see to kill
+                if STOP_FLAG.exists():
+                    break
+                time.sleep(0.25)
+            if STOP_FLAG.exists():
+                STOP_FLAG.unlink(missing_ok=True)
+                log.info("supervisor stopping on request")
+                return 0
             backoff = min(backoff * 2, 60)
     except Exception:
         log.exception("supervisor crashed")  # pythonw has no console; make the death visible
