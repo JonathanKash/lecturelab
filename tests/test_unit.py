@@ -2107,3 +2107,15 @@ def test_waiting_for_another_batch_does_not_use_up_attempts(ll):
         con.execute("UPDATE jobs SET status='running', owner_pid=999999, attempts=attempts+1 WHERE id=?", (jid,))
     ll.requeue_orphaned_jobs()
     assert ll.get_job(jid)["status"] == "queued"
+
+
+def test_a_zoom_passcode_in_the_link_never_shows_in_jobs(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    url = "https://ufl.zoom.us/rec/share/abc?pwd=s3cret&startTime=1"
+    monkeypatch.setattr(ll, "JOB_HANDLERS", {**ll.JOB_HANDLERS, "ingest": lambda job: {"lectures": []}})
+    queued = ll.enqueue("ingest", {"url": url})
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    assert "s3cret" not in c.get("/api/jobs").text  # queued: the label is the link without its passcode
+    ll.run_job(ll.claim_job(["ingest"]))
+    assert "s3cret" not in json.dumps(ll.get_job(queued)["payload"])  # and the stored link loses it after the run
+    assert "s3cret" not in c.get("/api/jobs?active=false").text

@@ -784,6 +784,8 @@ SECRET_KEYS = ("passcode",)  # scrubbed from a job's stored payload once it has 
 
 def run_job(job: dict) -> None:
     scrubbed = {k: v for k, v in job["payload"].items() if k not in SECRET_KEYS}
+    if scrubbed.get("url"):  # a Zoom link carries its passcode as ?pwd=
+        scrubbed["url"] = clean_source_url(scrubbed["url"])
     try:
         result = JOB_HANDLERS[job["kind"]](job)
         job_update(job["id"], status="done", result=result or {}, error=None, progress=None, payload=scrubbed)
@@ -5315,7 +5317,7 @@ def create_app():
                 ids = p.get("lecture_ids")
                 j["label"] = f"{'lecture ' + ', '.join(map(str, ids)) if ids else 'everything waiting'} ({p.get('mode', 'auto')})"
             else:
-                j["label"] = (p.get("url") or p.get("title") or p.get("key") or Path(p.get("path", "")).name
+                j["label"] = (clean_source_url(p.get("url")) or p.get("title") or p.get("key") or Path(p.get("path", "")).name
                               or (find_course(p.get("course_id")) or {}).get("code", ""))
         return out
 
