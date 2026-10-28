@@ -2301,3 +2301,9 @@ def test_a_canvas_page_that_turns_forbidden_keeps_the_pages_before_it(ll):
     nxt = '<https://ufl.instructure.com/api/v1/courses/1/modules?page=2&per_page=100>; rel="next"'
     cs, _ = fake_session(ll, [FakeResponse(200, [{"id": 1}], link=nxt), FakeResponse(403, {"errors": []})])
     assert cs.get("courses/1/modules") == [{"id": 1}]
+
+
+def test_releasing_a_missing_lecture_is_a_404(ll):
+    from fastapi.testclient import TestClient
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    assert c.post("/api/lectures/999/not-duplicate").status_code == 404

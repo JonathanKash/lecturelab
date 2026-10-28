@@ -5394,6 +5394,8 @@ def create_app():
 
     @app.post("/api/lectures/{lecture_id}/not-duplicate")
     def api_not_duplicate(lecture_id: int):
+        if not get_lecture(lecture_id):
+            raise HTTPException(404, "lecture not found")
         return release_duplicate(lecture_id)
 
     @app.delete("/api/lectures/{lecture_id}")
