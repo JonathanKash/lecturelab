@@ -108,7 +108,7 @@ input, textarea, select { font: 400 var(--t-s)/1.4 var(--sans); color: var(--ink
   border-radius: 8px; padding: 9px 12px; width: 100%; min-width: 0; }
 input:hover, textarea:hover, select:hover { border-color: var(--pencil); }
 [aria-invalid="true"] { border-color: var(--danger); }
-input[type="checkbox"] { width: 18px; height: 18px; padding: 0; accent-color: var(--ballpoint); flex: none; }
+input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; padding: 0; accent-color: var(--ballpoint); flex: none; }
 textarea { min-height: 200px; line-height: 1.5; resize: vertical; }
 label.field { display: grid; gap: 6px; font-size: var(--t-xs); font-weight: 600; color: var(--pencil); }
 .hint { margin: 0; font-size: var(--t-xs); color: var(--pencil); }
@@ -144,7 +144,8 @@ label.field { display: grid; gap: 6px; font-size: var(--t-xs); font-weight: 600;
   background: repeating-linear-gradient(135deg, var(--pencil) 0 2px, transparent 2px 5px); }
 .scrub-wrap { position: sticky; top: 0; z-index: 2; background: var(--paper); padding: 12px 0; margin-bottom: 8px; box-shadow: 0 1px 0 var(--rule);
   display: flex; align-items: center; gap: 16px; }
-.scrub { position: relative; flex: 1; height: 28px; cursor: pointer; touch-action: none; border-radius: 4px; }
+.scrub { position: relative; flex: 1; height: 28px; cursor: pointer; touch-action: none; border-radius: 4px;
+  overflow: clip; overflow-clip-margin: 4px; }  /* the playhead is a full-width layer slid along: without this it widens the page */
 .scrub-track { position: absolute; left: 0; right: 0; top: 8px; height: 12px; border-radius: 3px; overflow: hidden; color: var(--ink); }
 .scrub[data-tape="waiting"] .scrub-track { border: 1.5px dashed var(--pencil); }
 .scrub[data-tape="active"] .scrub-track { background: color-mix(in srgb, var(--highlighter) 30%, transparent); box-shadow: inset 0 0 0 1px var(--pencil); }
@@ -212,6 +213,220 @@ video { max-height: 50vh; background: #000; }
 .seg .ts:hover:not(:disabled) { background: none; color: var(--ballpoint); text-decoration: underline; }
 .source { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 4px 0; min-width: 0; }
 
+/* ---- notes (DESIGN.md): the transcript's timestamp gutter, so each point sits beside the moment it came from */
+.notches { position: absolute; inset: 3px 0; z-index: 1; pointer-events: none; }
+.notch { position: absolute; top: 0; bottom: 0; left: calc(var(--x) * 100%); width: 2px; margin-left: -1px; background: var(--ink);
+  box-shadow: 0 0 0 1px var(--paper); }  /* where a section of the notes starts: taller than the tape, so it never reads as a silence */
+#lec-tabs { margin-top: 8px; }
+#lec-tabs ~ [role="tabpanel"] { border-top: 0; padding-top: 24px; }
+#pane-notes { max-width: calc(68ch + 84px); }
+#pane-notes .ts { background: none; border: 0; padding: 0; min-height: 0; border-radius: 3px; font: 400 var(--t-xs)/1.6 var(--mono);
+  font-variant-numeric: tabular-nums; color: var(--pencil); vertical-align: baseline; }
+#pane-notes .ts:hover:not(:disabled) { background: none; color: var(--ballpoint); text-decoration: underline; }
+#pane-notes .link, .note-meta .link { background: none; border: 0; padding: 0; min-height: 0; font: inherit; color: var(--ballpoint);
+  text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+#pane-notes .link:hover:not(:disabled) { background: none; text-decoration-thickness: 2px; }
+.notes-top { margin-bottom: 24px; }
+#pane-notes > .row + .hint { margin-top: 8px; }
+.note-body { padding-left: 68px; font-size: var(--t-m); line-height: 1.6; overflow-wrap: break-word; }
+.note-body > :last-child { margin-bottom: 0; }
+.note-body p, .note-body ul, .np { margin: 0 0 12px; }
+.note-body ul { padding-left: 20px; }
+.note-body li + li { margin-top: 4px; }
+.note-body h5 { font: 600 var(--t-m)/1.3 var(--cond); margin: 24px 0 8px; text-wrap: balance; }
+.note-body > h5:first-child { margin-top: 8px; }
+.np { position: relative; }
+.np > p { margin: 0; }
+.np > .ts { position: absolute; left: -68px; top: 0; width: 56px; text-align: right; padding-top: 3px; }
+.note-body code { font: 400 .85em/1 var(--mono); padding: 1px 3px; border-radius: 3px; background: color-mix(in srgb, var(--ink) 6%, transparent); overflow-wrap: anywhere; }
+.code-block { position: relative; margin: 0 0 16px; }
+.code-block pre { margin: 0; padding: 12px 16px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; overflow-x: auto;
+  font: 400 var(--t-xs)/1.6 var(--mono); tab-size: 4; }
+.code-block pre code { font: inherit; padding: 0; background: none; box-shadow: none; }
+.code-block .lang { position: absolute; top: 1px; right: 1px; padding: 4px 10px; border-radius: 0 6px 0 6px; background: var(--sheet);
+  font-size: var(--t-xs); line-height: 1.4; color: var(--pencil); }
+.code-block:has(.lang) pre { padding-top: 28px; }
+.callout { margin: 0 0 16px; padding: 10px 16px; border-left: 3px solid var(--ink); background: var(--sheet); border-radius: 0 6px 6px 0; }
+.callout-label { margin: 0 0 2px !important; font: 600 var(--t-xs)/1.5 var(--sans); }
+.callout > :last-child { margin-bottom: 0; }
+.callout[data-kind="emphasis"] { border-left-color: var(--pencil); }
+.callout[data-kind="unclear"] { border-left: 3px dashed var(--pencil); }
+.callout[data-kind="unclear"] .callout-label, .callout[data-kind="emphasis"] .callout-label { color: var(--pencil); }
+.callout[data-kind="check"] { border-left: 3px dashed var(--danger); }
+.callout[data-kind="check"] .callout-label { color: var(--danger); }
+.note-body blockquote { margin: 0 0 12px; padding-left: 16px; border-left: 3px solid var(--rule); color: var(--pencil); }
+.math.display { margin: 0 0 16px; overflow-x: auto; overflow-y: hidden; }
+.notes-toc { margin: 32px 0 8px; padding-left: 68px; }
+.notes-toc h4 { font: 600 var(--t-s)/1.3 var(--sans); margin: 0 0 8px; }
+.notes-toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.notes-toc li { position: relative; font-size: var(--t-s); line-height: 1.5; }
+.notes-toc li .num { position: absolute; left: -68px; width: 56px; text-align: right; top: 3px; color: var(--pencil); }
+.notes-toc a { color: var(--ink); text-decoration: none; }
+.notes-toc a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.notes-toc li.logistics a { color: var(--pencil); }
+.note-sec { padding: 32px 0 8px; scroll-margin-top: 64px; }
+.note-sec + .note-sec { border-top: 1px solid var(--rule); }
+.note-head { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 12px; margin-bottom: 16px; }
+.note-head > .ts { text-align: right; align-self: start; padding-top: 7px; }
+.note-head h4 { font: 600 var(--t-l)/1.2 var(--cond); margin: 0; text-wrap: balance; overflow-wrap: anywhere; }
+.note-meta { margin: 6px 0 0; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: var(--t-xs); color: var(--pencil); }
+.note-gist { margin: 8px 0 0; font-size: var(--t-s); color: var(--pencil); max-width: 60ch; }
+.note-sec[data-kind="logistics"] .note-body { font-size: var(--t-s); }
+.notes-foot { margin-top: 32px; padding: 24px 0 0 68px; border-top: 1px solid var(--rule); display: grid; gap: 16px; justify-items: start; }
+.note-issues summary { cursor: pointer; font-size: var(--t-s); font-weight: 600; }
+.note-issues ul { margin: 12px 0 0; padding-left: 20px; font-size: var(--t-s); display: grid; gap: 8px; }
+.note-issues .claim.gone { text-decoration: line-through; text-decoration-color: var(--pencil); }
+.note-issues a { color: var(--ballpoint); }
+.notes-h { font: 600 var(--t-s)/1.3 var(--sans); margin: 0 0 8px; }
+.notes-foot .hint a { color: var(--ballpoint); }
+
+/* ---- quiz: questions on rule lines like lectures; a result is told by its word and its rule, never by color alone */
+.qz-list { list-style: none; margin: 0; padding: 0; max-width: 68ch; }
+.qz-q { padding: 24px 0; border-top: 1px solid var(--rule); }
+.qz-q fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.qz-head { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 0 4px; padding: 0; margin-bottom: 12px; font: 400 var(--t-m)/1.5 var(--sans); color: var(--ink); }
+.qz-head .num { font: 600 var(--t-m)/1.5 var(--sans); color: var(--pencil); font-variant-numeric: tabular-nums; }
+.qz-text { overflow-wrap: break-word; text-wrap: pretty; }
+.qz-choices { display: grid; gap: 4px; margin-left: 36px; }
+.qz-choice { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 6px; cursor: pointer; line-height: 1.45; }
+.qz-choice:hover:not(:has(:disabled)) { background: var(--sheet); border-color: var(--pencil); }
+.qz-choice:has(:checked) { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.qz-choice:has(:disabled) { cursor: default; }
+.qz-choice input { margin: 2px 0 0; }
+.qz-choice input:focus-visible { outline: none; }
+.qz-choice:has(input:focus-visible) { outline: 2px solid var(--ballpoint); outline-offset: 2px; }  /* the whole row is the control */
+.qz-choice > span { min-width: 0; overflow-wrap: break-word; }
+.qz-choice.is-right { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
+.qz-choice.is-wrong { border-color: var(--danger); box-shadow: inset 3px 0 0 var(--danger); }
+.qz-tag { display: block; margin-top: 2px; font: 600 var(--t-xs)/1.4 var(--sans); color: var(--pencil); }
+.is-wrong .qz-tag { color: var(--danger); }
+.qz-q textarea { display: block; width: calc(100% - 36px); margin-left: 36px; font: inherit; line-height: 1.5; min-height: 88px; resize: vertical; }
+.qz-q textarea:disabled { background: transparent; border-style: dashed; color: var(--ink); resize: none; }  /* locked once checked */
+.qz-res { margin: 16px 0 0 36px; padding-left: 16px; border-left: 3px solid var(--pencil); font-size: var(--t-s); line-height: 1.55; }
+.qz-res[data-verdict="right"] { border-left-color: var(--ink); }
+.qz-res[data-verdict="wrong"] { border-left-color: var(--danger); }
+.qz-res[data-verdict="open"] { border-left-style: dashed; }
+.qz-res p { margin: 0 0 8px; }
+.qz-res a { color: var(--ballpoint); }
+.qz-verdict b { font-weight: 600; }
+.qz-res[data-verdict="wrong"] .qz-verdict b { color: var(--danger); }
+.qz-k { display: block; font-size: var(--t-xs); color: var(--pencil); }
+.qz-why { color: var(--pencil); }
+.qz-mark { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; }
+.qz-mark button[aria-pressed="true"], .qz-mark button[aria-pressed="true"]:hover:not(:disabled) { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.qz-sum { max-width: 68ch; margin: 0 0 16px; padding: 16px 20px; background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; }
+.qz-sum:focus { outline: none; }
+.qz-sum p { margin: 0; }
+.qz-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; max-width: 68ch; padding-top: 24px; border-top: 1px solid var(--rule); }
+.qz-actions .hint { margin: 0; }
+#qz-err:empty { display: none; }
+
+/* ---- search */
+.sr-form { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 12px 16px; max-width: calc(68ch + 84px); margin-bottom: 24px; align-items: end; }
+#sr-q { font-size: var(--t-m); }
+.sr-form input, .sr-form select { block-size: 48px; }
+#sr-results { max-width: calc(68ch + 84px); }
+#sr-results[aria-busy="true"] { opacity: .55; }
+.sr-tip { max-width: 60ch; }
+.sr-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.sr-lec { padding: 20px 0 16px; border-top: 1px solid var(--rule); }
+.sr-lec h3 { font: 600 var(--t-m)/1.3 var(--sans); }
+.sr-lec h3 a { color: var(--ink); text-decoration: none; }
+.sr-lec h3 a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.sr-meta { margin: 4px 0 8px; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--t-xs); color: var(--pencil); }
+.sr-lec ul { list-style: none; margin: 0 -8px; padding: 0; display: grid; gap: 2px; }
+.sr-hit a { display: grid; grid-template-columns: 56px 52px minmax(0, 1fr); gap: 12px; align-items: baseline; padding: 6px 8px; border-radius: 4px; color: var(--ink); text-decoration: none; }
+.sr-hit a:hover { background: var(--sheet); }
+.sr-hit .num { text-align: right; color: var(--pencil); }
+.sr-kind { font-size: var(--t-xs); color: var(--pencil); }
+.sr-snip { font-size: var(--t-s); line-height: 1.5; overflow-wrap: anywhere; }
+mark { background: none; color: inherit; font-weight: 600; text-decoration: underline 2px var(--ink); text-underline-offset: 3px; }  /* highlighter is only for "now" */
+
+/* ---- review: one flashcard at a time. The card is the one real card in the app, because it is one. */
+#nav .due { margin-left: auto; padding-left: 8px; font: 600 var(--t-xs)/1.5 var(--sans); font-variant-numeric: tabular-nums; color: var(--pencil); }
+#nav a[data-route="review"] { display: flex; align-items: baseline; }
+#nav a[data-route="review"][hidden] { display: none; }
+.boxes { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 0 0 32px; }
+.boxes > div { border-top: 3px solid var(--rule); padding-top: 6px; min-width: 0; }
+.boxes > div.on { border-top-color: var(--ink); }
+.boxes b { display: block; font: 600 var(--t-m)/1.3 var(--sans); font-variant-numeric: tabular-nums; }
+.boxes span { display: block; font-size: var(--t-xs); line-height: 1.35; color: var(--pencil); }
+.boxes .short { display: none; }
+.flash { max-width: 68ch; background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; padding: 24px 28px; }
+.flash-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 16px; font-size: var(--t-xs); color: var(--pencil); }
+.flash-meta a { color: inherit; overflow-wrap: anywhere; }
+.flash-meta a:hover { color: var(--ink); }
+.flash-meta .rv-left { margin-left: auto; font-variant-numeric: tabular-nums; }
+.flash-q { font: 400 var(--t-l)/1.4 var(--sans); overflow-wrap: break-word; text-wrap: pretty; }
+.flash-q:focus, .flash-a:focus, .rv-done h3:focus { outline: none; }
+.flash code { font: 400 .85em/1 var(--mono); padding: 1px 3px; border-radius: 3px; background: color-mix(in srgb, var(--ink) 6%, transparent); overflow-wrap: anywhere; }
+.cloze { display: inline-block; min-width: 5ch; padding: 0 4px; border-bottom: 2px solid var(--pencil); color: var(--pencil); text-align: center; }
+.cloze.on { border-bottom-color: var(--ink); color: var(--ink); font-weight: 600; }
+.flash-a { margin-top: 20px; padding-top: 20px; border-top: 1px dashed var(--rule); font-size: var(--t-m); line-height: 1.6; }
+.flash-a p { margin: 0 0 8px; }
+.flash-a a { color: var(--ballpoint); }
+.flash-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.flash-actions kbd, .rv-undo kbd { margin-left: 10px; padding: 1px 5px; border: 1px solid currentColor; border-radius: 3px; font: 400 var(--t-xs)/1.3 var(--mono); opacity: .75; }
+.rv-undo { max-width: 68ch; min-height: 44px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 12px 0 0; font-size: var(--t-s); color: var(--pencil); }
+.rv-done { max-width: 68ch; padding: 8px 0; }
+.rv-done h3 { margin-bottom: 8px; }
+.rv-export { max-width: 68ch; margin-top: 32px; }
+.rv-export a { color: var(--ballpoint); }
+main:has(#rv-stage) .page-head, main:has(#rv-stage) .boxes { max-width: 68ch; }  /* one column: the head and boxes line up with the card */
+@media (pointer: coarse) { .flash-actions kbd, .rv-undo kbd { display: none; } }
+.notes-sum .notes-h { margin-bottom: 4px; }
+.notes-toc a[aria-current] { font-weight: 600; }
+/* Wide screens: the contents sit beside the notes and stay in view, marking the section being read. */
+@media (min-width: 1280px) {
+  main:has(#pane-notes:not([hidden]) .notes-toc) { max-width: 1240px; }
+  #pane-notes:has(.notes-toc) { max-width: none; display: grid; grid-template-columns: minmax(0, calc(68ch + 84px)) 260px; column-gap: 48px; align-content: start; }
+  #pane-notes > * { grid-column: 1; }
+  #pane-notes > .notes-toc { grid-column: 2; grid-row: 1 / span 40; align-self: start; position: sticky; top: 72px; margin: 0; padding: 0 0 0 16px;
+    border-left: 1px solid var(--rule); max-height: calc(100vh - 96px); overflow-y: auto; }
+  .notes-toc li .num { position: static; display: block; width: auto; text-align: left; }
+  .notes-toc li { padding: 4px 0; line-height: 1.35; }
+  .notes-toc li:has(a[aria-current])::before { content: ""; position: absolute; left: -17px; top: 4px; bottom: 4px; width: 2px; background: var(--ink); }
+}
+
+/* ---- slides: the deck beside the words (DESIGN.md). Markers section the transcript; the panel follows playback. */
+main:has(#slide-panel) { max-width: 1240px; }
+.reading:has(> #slide-panel) { display: grid; grid-template-columns: minmax(0, calc(68ch + 84px)) 320px; gap: 40px; align-items: start; }
+#slide-panel { position: sticky; top: 72px; display: grid; gap: 8px; min-width: 0; margin: 0; }
+.slide-img { display: block; width: 100%; aspect-ratio: var(--ar, 16 / 9); padding: 0; min-height: 0; border: 1px solid var(--rule);
+  border-radius: 6px; background: var(--sheet); overflow: hidden; cursor: zoom-in; }
+.slide-img:hover:not(.missing) { background: var(--sheet); border-color: var(--pencil); }
+button.slide-img.missing:hover:not(:disabled) { background: var(--sheet); color: var(--pencil); }  /* beats the global button hover */
+.slide-img img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.slide-img.missing { display: grid; place-items: center; padding: 12px; cursor: default; color: var(--pencil); font: 400 var(--t-xs)/1.4 var(--sans);
+  text-align: center; text-wrap: balance; border-style: dashed; }
+.slide-img.missing:active { transform: none; }
+.slide-mark { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 12px; padding: 20px 8px 6px; max-width: calc(68ch + 84px); }
+.slide-mark:first-child { padding-top: 0; }
+.slide-mark .no { font: 600 var(--t-xs)/1.5 var(--cond); color: var(--pencil); text-align: right; padding-top: 1px; white-space: nowrap; }
+.slide-mark .mark-title { margin: 0; font: 600 var(--t-s)/1.3 var(--cond); overflow-wrap: anywhere; }
+.slide-mark .mark-thumb { display: none; }
+.slide-mark.gap .mark-title { font: 400 var(--t-xs)/1.5 var(--sans); color: var(--pencil); padding-top: 1px; }
+.slides-state { display: grid; gap: 8px; max-width: 68ch; overflow-wrap: anywhere; }  /* uploaded file names can be one long word */
+.slides-state p { margin: 0; }
+.slide-controls { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end; margin-top: 20px; }
+.slide-controls .field { flex: 1 1 280px; max-width: 480px; }
+#slide-dlg { width: min(1100px, calc(100vw - 32px)); }
+#slide-dlg .head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+#slide-dlg-img { display: block; width: 100%; max-height: calc(100dvh - 240px); object-fit: contain; border: 1px solid var(--rule);
+  border-radius: 6px; background: var(--sheet); }
+#slide-dlg-missing { display: grid; place-items: center; min-height: 240px; border: 1px dashed var(--pencil); border-radius: 6px; color: var(--pencil); }
+#slide-dlg-also { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+#slide-dlg-also .ts { background: none; border: 0; padding: 0; min-height: 0; font: 400 var(--t-xs)/1.6 var(--mono);
+  font-variant-numeric: tabular-nums; color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule); text-underline-offset: 3px; }
+#slide-dlg-also .ts:hover { background: none; color: var(--ballpoint); text-decoration-color: currentColor; }
+@media (pointer: coarse) { #slide-dlg-also .ts { min-height: 44px; padding: 0 8px; } }
+@media (max-width: 1279px) {
+  .reading:has(> #slide-panel) { display: block; }
+  #slide-panel { display: none; }
+  .slide-mark .mark-thumb { display: block; width: min(240px, 100%); margin-top: 8px; }
+  .slide-mark .mark-thumb.missing { display: grid; }
+}
+
 /* ---- dialog */
 dialog { border: 1px solid var(--rule); border-radius: 12px; padding: 0; width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 32px);
   background: var(--sheet); color: var(--ink); overscroll-behavior: contain; box-shadow: 0 24px 64px rgba(0, 0, 0, .2); }
@@ -263,8 +478,28 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
   h2 { font-size: 28px; }
   .lec { gap: 4px 12px; }
   .lec .meta { flex-wrap: wrap; }
-  .job-rows .job { flex-wrap: wrap; row-gap: 0; }
-  .job-rows .job-detail { flex-basis: 100%; padding-left: 40px; white-space: normal; overflow-wrap: anywhere; }
+  /* Phones can't spare a gutter: jump times lead their paragraph instead of hanging beside it. */
+  .note-body, .notes-toc, .notes-foot { padding-left: 0; }
+  .np > .ts { position: static; width: auto; padding: 0; margin-right: 8px; }
+  .np > p { display: inline; }
+  .note-head { display: block; }
+  .note-head > .ts { display: block; padding: 0; margin-bottom: 2px; }
+  .notes-toc li .num { position: static; display: inline-block; width: auto; margin-right: 8px; }
+  .qz-head { grid-template-columns: 24px minmax(0, 1fr); }
+  .qz-choices, .qz-res { margin-left: 0; }
+  .qz-q textarea { width: 100%; margin-left: 0; }
+  .qz-actions button { flex: 1 1 auto; }
+  .sr-form { grid-template-columns: minmax(0, 1fr); }
+  .sr-hit a { grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; padding: 8px; }
+  .sr-hit .num { text-align: left; }
+  .sr-snip { grid-column: 1 / -1; }
+  .flash { padding: 20px 16px; }
+  .flash-actions button { flex: 1; }
+  .boxes { gap: 6px; }
+  .boxes .long { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }  /* still read out */
+  .boxes .short { display: block; }
+  .job-rows .job, #slides-sec .job { flex-wrap: wrap; row-gap: 0; }
+  .job-rows .job-detail, #slides-sec .job-detail { flex-basis: 100%; padding-left: 40px; white-space: normal; overflow-wrap: anywhere; }
   .lec .tape { order: -1; flex-basis: 100%; max-width: none; margin: 4px 0 2px; }
 }
 @media (max-width: 480px) { .form3 { grid-template-columns: 1fr; } }
@@ -279,6 +514,8 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
   <div class="navs">
     <nav id="nav" aria-label="Main">
       <a href="#/" data-route="library">Library</a>
+      <a href="#/review" data-route="review" hidden>Review <span class="due" id="due-count"></span></a>
+      <a href="#/search" data-route="search" hidden aria-keyshortcuts="/">Search</a>
       <a href="#/courses" data-route="courses">Courses &amp; vocabulary</a>
     </nav>
     <div class="nav-head" id="courses-head">Courses</div>
@@ -342,7 +579,16 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
     <div class="foot row end"><button value="cancel" class="ghost" autofocus>Cancel</button><button value="ok" class="danger solid" id="confirm-ok"></button></div>
   </form>
 </dialog>
+<dialog id="slide-dlg" aria-labelledby="slide-dlg-h">
+  <div class="head"><h2 id="slide-dlg-h"></h2><span class="small muted" id="slide-dlg-n"></span></div>
+  <div class="body"><img id="slide-dlg-img" alt=""><div id="slide-dlg-missing" hidden>This slide’s image isn’t available right now. Reload the page in a minute.</div>
+    <p class="small muted" id="slide-dlg-also" hidden></p></div>
+  <div class="foot row spread"><div class="row"><button type="button" class="ghost" id="slide-prev" aria-keyshortcuts="ArrowLeft">Previous slide</button>
+    <button type="button" class="ghost" id="slide-next" aria-keyshortcuts="ArrowRight">Next slide</button></div>
+    <div class="row"><button type="button" class="ghost" id="slide-close">Close</button><button type="button" id="slide-play"></button></div></div>
+</dialog>
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<p class="vh" id="sl-live" aria-live="polite"></p>
 
 <script>
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -373,7 +619,7 @@ const utc = s => Date.parse(s.replace(" ", "T") + "Z");
 const fmtWhen = s => s ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(utc(s)) : "";
 const STATUS = { queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "now"],
   transcribed: ["transcribed", "ok"], aligned: ["aligned", "ok"], notes_queued: ["notes queued", ""],
-  notes_running: ["writing notes", "now"], notes_done: ["notes ready", "ok"], exported: ["exported", "ok"],
+  notes_running: ["writing notes", "now"], notes_done: ["notes ready", "ok"], exported: ["notes ready", "ok"],
   duplicate: ["possible duplicate", "warn"], error: ["error", "bad"], waiting_quota: ["waiting for plan limit", "warn"] };
 const chip = st => { const [label, cls] = STATUS[st] || [st, ""]; return `<span class="chip ${cls}" data-status="${esc(st)}">${esc(label)}</span>`; };
 const courseOptions = (sel, blank = "No course") => `<option value="">${blank}</option>` +
@@ -404,7 +650,7 @@ function lectureList(lectures, course = null, inboxes = []) {
     <a class="lec" href="#/lecture/${l.id}" data-lecture="${l.id}">
       <span class="t">${esc(l.title)}</span>
       <span class="d">${esc(fmtDate(l.date))}</span>
-      <span class="meta"><span class="code" translate="no">${esc(l.course_code || "No course")}</span>
+      <span class="meta">${course ? "" : `<span class="code" translate="no">${esc(l.course_code || "No course")}</span>`}
         <span class="tape" data-tape="${tapeState(l.status)}" style="--len:${Math.max((l.duration_sec || 0) / longest, .04).toFixed(3)}" aria-hidden="true"><span></span></span>
         <span class="num">${l.duration_sec ? fmtTs(l.duration_sec) : ""}</span>${l.has_video ? "<span>video</span>" : ""}
         ${chip(l.status)}</span>
@@ -415,9 +661,10 @@ const termCount = v => { const n = (v || "").split("\n").filter(t => t.trim()).l
   return n ? `${n} ${n === 1 ? "term" : "terms"}` : "No terms yet"; };
 const jobKind = k => k.charAt(0).toUpperCase() + k.slice(1);
 const JOB_VERB = { ingest: "Adding a recording", canvas_pull: "Pulling from Canvas", canvas_scan: "Scanning Canvas",
-  transcribe: "Transcribing" };
+  transcribe: "Transcribing", slides: "Lining up slides", deck_pull: "Downloading slides" };
 const JOB_WAIT = { ingest: "waiting to be added", canvas_pull: "waiting to be pulled from Canvas",
-  canvas_scan: "Canvas scans waiting", transcribe: "waiting to transcribe" };
+  canvas_scan: "Canvas scans waiting", transcribe: "waiting to transcribe", slides: "waiting to line up slides",
+  deck_pull: "slide decks waiting to download" };
 const OPAQUE = /^[a-z]+:[\w-]{16,}$/;
 const jobVerb = k => JOB_VERB[k] || jobKind(k.replace(/_/g, " "));
 // Running jobs get a row each; queued ones collapse to one line per kind, so a 26-file pull doesn't bury the Library.
@@ -488,6 +735,63 @@ const views = {
             <button class="save-course ghost">Save vocabulary</button></div>
         </section>`).join("")}</div>`;
   },
+  async quiz(id) {
+    const seq = renderSeq, [l, d] = await Promise.all([api(`/api/lectures/${id}`),
+      api(`/api/lectures/${id}/quiz`).catch(x => { if (x.status === 404) return null; throw x; })]);
+    const head = `<div class="page-head"><div><h2>Quiz</h2><p class="sub"><a href="#/lecture/${+l.id}">${esc(l.title)}</a></p></div></div>`;
+    if (!d) return `${head}<div class="empty"><h3>Quizzes aren’t on this server yet</h3>
+      <p>They come with notes. Once the server is updated and restarted, each lecture with notes gets a quiz here.</p>
+      <a class="btn" href="#/lecture/${+l.id}">Back to the lecture</a></div>`;
+    const qs = [...(d.questions || [])].sort((a, b) => a.idx - b.idx).map((q, i) => ({ ...q, idx: i }));
+    if (!qs.length) return `${head}<div class="empty"><h3>This lecture has no quiz yet</h3>
+      <p>The quiz is written along with the lecture’s notes.</p><a class="btn" href="?tab=notes#/lecture/${+l.id}">Go to the notes</a></div>`;
+    if (seq === renderSeq) qz.next = { id: +l.id, l, qs, last: d.last_attempt };
+    const last = d.last_attempt;
+    return `<div class="page-head"><div><h2>Quiz</h2><p class="sub"><span>${qs.length} questions on <a href="#/lecture/${+l.id}">${esc(l.title)}</a></span>${
+      last ? `<span>Last time ${+last.score} of ${+last.total}, ${esc(fmtWhen(last.at))}</span>` : ""}</p></div></div>
+      <form id="qz-form" novalidate>
+        <div id="qz-sum" class="qz-sum" tabindex="-1" hidden></div>
+        <ol class="qz-list" id="qz-list"></ol>
+        <div class="qz-actions" id="qz-actions"></div>
+        <p class="err" id="qz-err" role="alert"></p>
+      </form>`;
+  },
+  async search() {
+    const q = (new URLSearchParams(location.search).get("q") || "").trim(), course = +new URLSearchParams(location.search).get("course") || null;
+    let body;
+    try { body = searchResults(q ? await api(searchUrl(q, course)) : [], q); }
+    catch (x) { if (x.status !== 404) throw x; body = SR_MISSING; }
+    return `<div class="page-head"><h2>Search</h2></div>
+      <form class="sr-form" role="search" id="sr-form">
+        <label class="field">Search every lecture <input type="search" id="sr-q" name="q" value="${esc(q)}" autocomplete="off" spellcheck="false"
+          placeholder="For example: dynamic scoping…" aria-keyshortcuts="/"></label>
+        <label class="field">Course <select id="sr-course"><option value="">All courses</option>${
+          state.courses.map(c => `<option value="${c.id}" ${c.id === course ? "selected" : ""}>${esc(c.code)}</option>`).join("")}</select></label></form>
+      <div id="sr-results">${body}</div>`;
+  },
+  async review() {
+    const q = new URLSearchParams(location.search), lecture = +q.get("lecture") || null, course = lecture ? null : +q.get("course") || null;
+    const p = new URLSearchParams({ limit: "200" });
+    if (course) p.set("course_id", course);
+    if (lecture) p.set("lecture_id", lecture);
+    const seq = renderSeq, [d, lec] = await Promise.all([  // a missing lecture is the error page; a missing endpoint is an older server
+      api(`/api/review?${p}`).catch(x => { if (x.status === 404) return null; throw x; }), lecture ? api(`/api/lectures/${lecture}`) : null]);
+    if (!d) {
+      return `<div class="page-head"><h2>Review</h2></div><div class="empty"><h3>Flashcards aren’t on this server yet</h3>
+        <p>They come with notes. Once the server is updated and restarted, the cards from each lecture’s notes show up here.</p>
+        <a class="btn" href="#/">Back to Library</a></div>`;
+    }
+    const cards = d.cards || [];
+    if (seq === renderSeq) rv.next = { d, cards, scope: { course, lecture: lec } };
+    const opts = `<option value="">All courses</option>${lec ? `<option value="l${lec.id}" selected>${esc(lec.title)}</option>` : ""}${
+      state.courses.map(c => `<option value="${c.id}" ${c.id === course ? "selected" : ""}>${esc(c.code)}: ${esc(c.name)}</option>`).join("")}`;
+    return `<div class="page-head"><div><h2>Review</h2><p class="sub" id="rv-sub">${rvSub(d)}</p></div>
+        <label class="field">Cards from <select id="rv-scope">${opts}</select></label></div>
+      <div id="rv-boxes"></div>
+      <section id="rv-stage" aria-label="Flashcard"></section>
+      ${(d.boxes || []).some(n => +n) || cards.length ? `<p class="hint rv-export"><a href="/api/anki.tsv${lecture ? `?lecture_id=${lecture}` : course ? `?course_id=${course}` : ""}" download>Download ${
+        lecture || course ? "these flashcards" : "all flashcards"} for Anki</a>. In Anki, use File, then Import, and pick the file.</p>` : ""}`;
+  },
   async course(id) {
     const c = state.courses.find(c => c.id == id);
     if (!c) throw Object.assign(new Error("course not found"), { status: 404 });
@@ -496,7 +800,7 @@ const views = {
       ${jobsPanel()}${lectureList(state.lectures.filter(l => l.course_id == id), c, inboxes)}`;
   },
   async lecture(id) {
-    const l = await api(`/api/lectures/${id}`);
+    const seq = renderSeq, l = await api(`/api/lectures/${id}`);
     const media = l.video_path
       ? `<video id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/video"></video>`
       : `<audio id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/audio"></audio>`;
@@ -505,9 +809,20 @@ const views = {
         <div class="row" style="margin-top:12px"><button id="not-dup">Not a duplicate</button>
         <button class="danger" id="del-dup">Delete this copy</button></div></div>` : "";
     const err = l.status === "error" ? `<div class="banner bad"><b>Error:</b> ${esc(l.error)}</div>` : "";
-    const [segs, ts, jobs] = await Promise.all([l.segment_count ? api(`/api/lectures/${l.id}/segments`) : [],
-      api("/api/transcribe/status"), api("/api/jobs")]);
+    const [segs, ts, jobs, sl, nt] = await Promise.all([l.segment_count ? api(`/api/lectures/${l.id}/segments`) : [],
+      api("/api/transcribe/status"), api("/api/jobs"), api(`/api/lectures/${l.id}/slides`).catch(e => e.status === 404 ? null
+        : { state: "unavailable", error: e.message, slides: [], candidates: [] }),
+      api(`/api/lectures/${l.id}/notes`).catch(e => e.status === 404 ? null : { state: "unavailable", error: e.message })]);
     state.jobs = jobs;
+    const byNo = new Map((sl?.slides || []).map(s => [s.no, s]));
+    if (seq === renderSeq) { slides.next = { id: l.id, d: sl }; notes.next = { id: l.id, d: nt }; }  // the binder commits them, so only the render that won does
+    const aligned = sl?.state === "aligned" && sl.deck && sl.slides.length && segs.some(s => s.slide_no != null);
+    let lastSlide = null, seen = false;  // a stretch with no slide gets its own marker, once a slide has come up
+    const mark = s => { const no = s.slide_no ?? null;
+      if (!aligned || no === lastSlide) return "";
+      lastSlide = no;
+      if (no == null) return seen ? gapMark : "";
+      seen = true; const sd = byNo.get(no); return sd ? slideMark(sd, sl) : ""; };
     const busy = transcribeRunning(ts) ? "disabled" : "";
     const canTranscribe = l.status !== "transcribing"
       && (["queued_transcribe", "error"].includes(l.status) || l.transcript_source === "v1");
@@ -517,19 +832,30 @@ const views = {
     const srcNote = l.transcript_source === "v1" ? "Old v1 transcript (Whisper base): a large-v3 transcript replaces it once transcribed"
       : l.transcript_source ? `by ${esc(l.transcript_source)}` : "";
     const course = state.courses.find(c => c.id == l.course_id);
+    slideCanvas.set(l.id, !!course?.canvas_id);
+    // Notes and transcript are two ways to read the same lecture: tabs, with notes first once they exist.
+    const q = new URLSearchParams(location.search), asked = q.get("tab");
+    const tab = !nt ? null : ["notes", "transcript"].includes(asked) ? asked : q.has("section") ? "notes" : q.has("t") ? "transcript"
+      : notesDone(nt) ? "notes" : "transcript";
+    const tabBtn = (k, label) => `<button type="button" role="tab" id="tab-${k}" data-tab="${k}" aria-controls="${k === "notes" ? "pane-notes" : "transcript-card"}"
+      aria-selected="${tab === k}" ${tab === k ? 'class="on"' : 'tabindex="-1"'}>${label}</button>`;
     return `<div class="page-head"><div><h2 id="lec-title">${esc(l.title)}</h2>
         <p class="sub">${course ? `<span class="code">${esc(course.code)}</span>` : ""}<span>${esc(fmtDate(l.date))}</span>
           <span class="num">${l.duration_sec ? fmtTs(l.duration_sec) : ""}</span></p></div>${chip(l.status)}</div>${dup}${err}
       <div class="player">${media}</div>
-      ${scrubber(l, segs)}
+      ${scrubber(l, segs, notesDone(nt) ? nt.sections : null)}
       <p class="hint keys">Keys: K plays or pauses, J and L skip 10 seconds. Click the tape or a timestamp to jump there.</p>
-      <section class="sec" id="transcript-card"><div class="sec-head"><div><h3>Transcript</h3>
+      ${tab ? `<div class="tabs" id="lec-tabs" role="tablist" aria-label="Read the lecture as">${tabBtn("notes", "Notes")}${tabBtn("transcript", "Transcript")}</div>
+      <section class="sec" id="pane-notes" role="tabpanel" aria-labelledby="tab-notes" ${tab === "notes" ? "" : "hidden"}>${safeNotesPane(nt, { id: l.id, segment_count: segs.length })}</section>` : ""}
+      <section class="sec" id="transcript-card" ${tab ? `role="tabpanel" aria-labelledby="tab-transcript" ${tab === "transcript" ? "" : "hidden"}` : ""}><div class="sec-head"><div><h3 ${tab ? 'class="vh"' : ""}>Transcript</h3>
         <p class="hint" id="tr-source" style="margin-top:4px">${srcNote}</p></div><div class="row">${tbtns}</div></div>
-        ${segs.length ? `<div id="transcript">${segs.map(s => `<p class="seg" data-start="${s.start}" data-end="${s.end}"><button type="button"
-          class="ts" data-seek="${s.start}" aria-label="Play from ${fmtTs(s.start)}">${fmtTs(s.start)}</button><span>${esc(s.text)}</span></p>`).join("")}</div>`
+        ${segs.length ? `<div class="reading"><div id="transcript">${segs.map(s => `${mark(s)}<p class="seg" data-start="${s.start}" data-end="${s.end}"
+          data-slide="${esc(s.slide_no ?? "")}"><button type="button" class="ts" data-seek="${s.start}" aria-label="Play from ${fmtTs(s.start)}">${fmtTs(s.start)}</button><span>${esc(s.text)}</span></p>`).join("")}</div>
+          ${aligned ? slidePanel(sl) : ""}</div>`
           : `<p class="muted" id="no-transcript">${l.status === "transcribing" ? "Transcribing now. The text appears here when the batch finishes."
             : canTranscribe ? "Not transcribed yet. Transcribe it on a Colab GPU (fast) or on this laptop (slow, works offline)."
             : "Not transcribed yet."}</p>`}</section>
+      ${slidesSection(sl, l.id, false)}
       <section class="sec" id="lec-meta"><div class="sec-head"><h3>Details</h3></div><div class="form3">
         <label class="field">Title <input id="m-title" name="title" autocomplete="off" value="${esc(l.title)}"></label>
         <label class="field">Course <select id="m-course" name="course">${courseOptions(l.course_id)}</select></label>
@@ -543,6 +869,43 @@ const views = {
 };
 
 const binders = {
+  quiz() {
+    if (qz.next) Object.assign(qz, qz.next, { res: null, marks: {}, saved: null, draft: {}, busy: null });
+    qz.next = null; qz.gen++;  // anything still in flight belongs to the copy of the page that's gone
+    const f = $("#qz-form"); if (!f) return;
+    qzDraw();
+    f.onsubmit = qzCheck;
+    const typed = () => { if (!qz.res) { qzDirty(); qzCount(); } };
+    f.addEventListener("input", typed); f.addEventListener("change", typed);
+    f.addEventListener("click", e => {  // marking a written answer
+      const b = e.target.closest("[data-mark]"); if (!b || !qz.res || qz.saved || qz.busy) return;
+      const id = b.dataset.q, v = b.dataset.mark === "1", q = qz.qs.find(q => String(q.id) === id);
+      if (!q || !qzMarkable(q)) return;
+      qz.marks[q.id] = qz.marks[q.id] === v ? undefined : v;  // pressing it again unmarks
+      qzDirty(); qzDraw(`[data-q="${CSS.escape(id)}"][data-mark="${b.dataset.mark}"]`);
+      const { list, right } = qzScore();
+      $("#sl-live").textContent = `${qz.marks[q.id] == null ? "Unmarked" : v ? "Marked right" : "Marked wrong"}. ${right} of ${list.length} right so far.`;
+    });
+  },
+  search() {
+    const input = $("#sr-q");
+    input.oninput = () => { clearTimeout(sr.t); sr.t = setTimeout(searchNow, 250); };
+    $("#sr-course").onchange = searchNow;
+    $("#sr-form").onsubmit = e => { e.preventDefault(); clearTimeout(sr.t); searchNow(); };
+    input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length);
+  },
+  review() {
+    if (rv.next) Object.assign(rv, rv.next, { i: 0, shown: false, undo: null, answered: 0, seq: rv.seq + 1 });
+    rv.next = null;
+    if (!$("#rv-stage")) return;
+    rvDraw();
+    $("#rv-scope").onchange = e => {  // the scope is in the URL: ?course=1 or ?lecture=22
+      const v = e.target.value, u = new URL(location.href);
+      u.searchParams.delete("course"); u.searchParams.delete("lecture");
+      if (v.startsWith("l")) u.searchParams.set("lecture", v.slice(1)); else if (v) u.searchParams.set("course", v);
+      history.replaceState(history.state, "", u); render();
+    };
+  },
   library() {
     $("#tr-queued").onclick = async () => {
       const r = await api("/api/transcribe", { method: "POST", body: { mode: "auto" } });
@@ -595,6 +958,33 @@ const binders = {
     if ($("#tr-local")) $("#tr-local").onclick = startTranscribe("local");
     $$("[data-seek]").forEach(a => a.onclick = e => { e.preventDefault(); seek(+a.dataset.seek); });
     bindPlayer();
+    if (slides.next?.id === +id) setSlides(+id, slides.next.d);
+    slides.next = null;
+    slides.shown = $("#slide-panel") ? +$("#slide-panel").dataset.shown : null;
+    bindSlidesSection(id);
+    slides.html = slidesSection(slides.data, +id);
+    schedulePoll(+id, slides.data);
+    const want = +new URLSearchParams(location.search).get("slide");  // a link to a slide opens the viewer on it
+    if (want && $(".slide-mark") && slides.byNo.has(want) && !$("#slide-dlg").open) openSlide(want);
+    else if (want && !$("#slide-dlg").open) setSlideParam(null);
+    if (notes.next?.id === +id) { notes.id = +id; notes.data = notes.next.d; }
+    notes.next = null; clearTimeout(notes.poll); notes.req++;
+    if ($("#pane-notes")) { bindNotes(+id); scheduleNotes(+id, notes.data); markToc(); }
+    $$("#lec-tabs [role=tab]").forEach(t => t.onclick = () => showTab(t.dataset.tab, true));
+    if ($("#lec-tabs")) $("#lec-tabs").onkeydown = e => {  // arrow keys move between tabs, as a tablist should
+      const tabs = $$("#lec-tabs [role=tab]"), i = tabs.indexOf(document.activeElement);
+      const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+      if (i < 0 || j === undefined) return;
+      e.preventDefault(); const t = tabs[(j + tabs.length) % tabs.length]; t.focus(); t.click();
+    };
+    const secN = new URL(location.href).searchParams.get("section");  // ?section=3 opens the notes at that section, once
+    if (secN != null) { setNoteParam("section", null); goSection(+secN); }
+    const at = new URL(location.href).searchParams.get("t");  // ?t=754 (from notes, Anki, exports) opens at that moment, once
+    if (at != null) { const u = new URL(location.href); u.searchParams.delete("t"); history.replaceState(history.state, "", u);
+      const t = Math.max(0, +at || 0), p = $("#player"), go = () => { follow = true; p.currentTime = t; };
+      const line = $$(".seg").findLast(s => +s.dataset.start <= t);  // jump straight there: the page just opened, nothing to keep
+      if (line) { autoScroll(); line.scrollIntoView({ block: "center" }); }
+      if (p) p.readyState ? go() : p.addEventListener("loadedmetadata", go, { once: true }); }
   },
 };
 
@@ -602,14 +992,14 @@ const binders = {
 const fmtTs = s => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
   return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(sec).padStart(2, "0")}`; };
 // The lecture page's tape: one tick per transcript segment, the played part highlighted, an ink playhead.
-function scrubber(l, segs) {
+function scrubber(l, segs, secs) {
   const dur = l.duration_sec || segs.at(-1)?.end || 0;
   if (!dur) return "";
   const ticks = segs.map(s => `<rect x="${(s.start / dur * 1000).toFixed(1)}" y="0" height="12"
     width="${Math.max((s.end - s.start) / dur * 1000, .8).toFixed(1)}"/>`).join("");
   return `<div class="scrub-wrap"><div class="scrub" id="scrub" data-tape="${tapeState(l.status)}" data-dur="${dur}" role="slider" tabindex="0"
       aria-label="Seek" aria-valuemin="0" aria-valuemax="${Math.round(dur)}" aria-valuenow="0" aria-valuetext="0:00 of ${fmtTs(dur)}">
-      <div class="scrub-track"><span class="scrub-played"></span>
+      <span class="notches" aria-hidden="true">${notchesHtml(secs, dur)}</span><div class="scrub-track"><span class="scrub-played"></span>
         ${ticks ? `<svg viewBox="0 0 1000 12" preserveAspectRatio="none" aria-hidden="true" fill="currentColor">${ticks}</svg>` : ""}</div><span class="scrub-head"></span></div>
     <span class="num" id="scrub-time">0:00 / ${fmtTs(dur)}</span></div>`;
 }
@@ -648,14 +1038,769 @@ function bindPlayer() {
     const hit = segs.find(s => t >= +s.dataset.start && t < +s.dataset.end + 0.3);
     if (hit && hit !== cur) {
       // Only scroll if the reader was looking at the previous line; if they scrolled away to read, leave them be.
-      if (cur && !inView(cur)) follow = false;
+      if (cur && cur.offsetParent && !inView(cur)) follow = false;
       cur?.classList.remove("now"); hit.classList.add("now"); cur = hit;
       const r = hit.getBoundingClientRect();
-      if (follow && (r.top < 80 || r.bottom > innerHeight - 40))
-        hit.scrollIntoView({ block: "center", behavior: reduceMotion.matches ? "auto" : "smooth" });
+      if (follow && hit.offsetParent && (r.top < 80 || r.bottom > innerHeight - 40))
+        { autoScroll(); hit.scrollIntoView({ block: "center", behavior: reduceMotion.matches ? "auto" : "smooth" }); }
+    }
+    if (slides.data?.state === "aligned") {  // in a pause between lines, the slide of the line before it
+      const at = hit || segs.findLast(s => +s.dataset.start <= t);
+      if (at) showSlide(at.dataset.slide ? +at.dataset.slide : null);
     }
   };
 }
+
+// ---- slides: the deck beside the words. segments[].slide_no is which slide is on screen at any moment.
+const slides = { id: null, data: null, byNo: new Map(), shown: null, poll: 0, html: "", viewing: null, req: 0, busy: 0, next: null };
+const SLIDE_SOURCE = { canvas: "from Canvas", drive: "from Google Drive", upload: "uploaded here", ocr: "read from the video" };
+// Short reason codes from the server read as sentences; anything else is already a sentence and shows as is.
+const SLIDE_REASON = { queued: "Queued: the slides line up with the transcript in a moment.",
+  "no transcript yet": "Waiting for the transcript: the slides line up once this lecture is transcribed.",
+  "downloading the slides": "Downloading the slides…",
+  "reading the slides": "Reading the slides…",
+  "not checked yet": "No deck is matched yet. Attach one below, or look for slides to read them off the video." };
+// Whether a lecture's course is on Canvas: its decks are matched on the course's next Canvas scan.
+const slideCanvas = new Map();
+const SLIDE_SAY = { none: "No slides for this lecture.", waiting: "Slides are waiting to be lined up.",
+  aligning: "Lining the slides up with the transcript.", aligned: "Slides lined up with the transcript.",
+  error: "The slides couldn’t be lined up.", unavailable: "Slides didn’t load." };
+const slideReason = r => SLIDE_REASON[(r || "").toLowerCase()] || r;
+const slideAr = d => d?.deck?.thumb_h ? `${+d.deck.thumb_w || 320} / ${+d.deck.thumb_h}` : "16 / 9";
+const slideName = s => s.title || `Slide ${s.no}`;
+const pageCount = n => `${n} ${+n === 1 ? "page" : "pages"}`;
+function setSlides(id, d) {
+  clearTimeout(slides.poll); slides.req++;  // anything still in flight is older than this
+  Object.assign(slides, { id, data: d, byNo: new Map((d?.slides || []).map(s => [s.no, s])), shown: null, html: "", deferred: false });
+}
+const slideImg = (s, d, cls = "slide-img") => `<button type="button" class="${cls}" data-open-slide="${esc(s.no)}" style="--ar:${slideAr(d)}"
+  aria-label="Open slide ${esc(s.no)}: ${esc(slideName(s))}"><img src="${esc(s.thumb)}" alt="" loading="lazy" decoding="async"></button>`;
+const slideMark = (s, d) => `<div class="slide-mark" data-slide="${esc(s.no)}"><span class="no" aria-hidden="true">Slide ${esc(s.no)}</span>
+  <div><h4 class="mark-title"><span class="vh">Slide ${esc(s.no)}: </span>${esc(slideName(s))}</h4>${slideImg(s, d, "slide-img mark-thumb")}</div></div>`;
+const gapMark = `<div class="slide-mark gap" data-slide=""><span class="no" aria-hidden="true">No slide</span>
+  <h4 class="mark-title"><span class="vh">No slide: </span>The video shows something else here, not the slides.</h4></div>`;
+const panelNone = d => `<div class="slide-img missing" style="--ar:${slideAr(d)}">No slide on screen here</div>`;
+const panelBody = (s, d) => `${slideImg(s, d)}<figcaption class="small muted">Slide ${esc(s.no)} of ${esc(d.deck.pages)}</figcaption>`;
+function slidePanel(d) {
+  const s = d.slides.find(s => s.first != null) || d.slides[0];
+  return `<figure id="slide-panel" aria-label="Slide on screen" data-shown="${esc(s.no)}">${panelBody(s, d)}</figure>`;
+}
+// The panel follows the line being played, or the top line on screen while paused.
+function showSlide(no) {  // no = null: nothing from the deck is on screen at that moment
+  const panel = $("#slide-panel"), s = no == null ? null : slides.byNo.get(no);
+  if (!panel?.offsetParent || (no != null && !s) || (no ?? "none") === slides.shown) return;
+  const hadFocus = panel.contains(document.activeElement);
+  panel.innerHTML = s ? panelBody(s, slides.data) : panelNone(slides.data); slides.shown = no ?? "none";
+  if (hadFocus) ($("button.slide-img", panel) || $("#transcript .seg.now .ts") || panel).focus?.({ preventScroll: true });
+}
+let slideRaf = 0, autoScrollUntil = 0;  // scrolls the page makes itself don't count as the reader moving
+const autoScroll = () => { autoScrollUntil = performance.now() + 1200; };
+addEventListener("scrollend", () => { autoScrollUntil = 0; });
+addEventListener("scroll", () => {
+  if (slideRaf || performance.now() < autoScrollUntil) return;
+  slideRaf = requestAnimationFrame(() => {
+    slideRaf = 0;
+    const panel = $("#slide-panel"), p = $("#player");
+    if (!panel?.offsetParent || (p && !p.paused)) return;
+    const seg = topSeg(); if (seg) showSlide(seg.dataset.slide ? +seg.dataset.slide : null);
+  });
+}, { passive: true });
+function topSeg() {  // the first transcript line fully below the sticky tape
+  const top = ($(".scrub-wrap")?.getBoundingClientRect().bottom ?? 0) + 8, segs = $$("#transcript .seg");
+  let lo = 0, hi = segs.length - 1;  // segments run top to bottom: binary search
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (segs[mid].getBoundingClientRect().top >= top) hi = mid; else lo = mid + 1; }
+  return segs[lo];
+}
+// Re-render the lecture page without losing the reader's place: the line (or section) they were looking at, the player
+// position and focus all come back.
+async function renderKeepingPlace(prefer) {
+  const p = $("#player"), t = p?.currentTime || 0, focus = document.activeElement?.id;
+  const shown = el => { const r = el?.getBoundingClientRect(); return r && r.bottom > 0 && r.top < innerHeight; };
+  const seg = topSeg(), el = [prefer && $(prefer), seg, $("#slides-sec")].find(shown);
+  const sel = !el ? null : el === seg ? `#transcript .seg[data-start="${seg.dataset.start}"]` : `#${el.id}`, y = el?.getBoundingClientRect().top;
+  const now = $("#transcript .seg.now"); if (now && !shown(now)) follow = false;  // don't yank the page back to the playing line
+  const mine = renderSeq + 1;
+  await render();
+  if (renderSeq !== mine) return;  // another navigation won: this place belongs to a page that's gone
+  const np = $("#player"); if (np && t) { np.currentTime = t; if (p && !p.paused) np.play().catch(() => {}); }
+  const ne = sel && $(sel); if (ne) scrollBy(0, ne.getBoundingClientRect().top - y);
+  if (focus && $(`#${CSS.escape(focus)}`)) $(`#${CSS.escape(focus)}`).focus({ preventScroll: true });
+}
+
+function slidesSection(d, id, deferred = slides.deferred) {
+  if (!d) return "";  // no slides endpoint on this server
+  const deck = d.deck, plural = k => `${k} ${k === 1 ? "slide" : "slides"}`;
+  const deckLine = deck ? `<p><b>${esc(deck.title)}</b>, ${esc(pageCount(deck.pages))}, ${esc(SLIDE_SOURCE[deck.source] || deck.source)}.
+    ${["ocr", "upload"].includes(deck.source) ? "" : deck.how === "manual" ? "You picked this deck." : "Matched automatically."}</p>` : "";
+  let body;
+  if (d.state === "unavailable") body = `<p class="err">Slides didn’t load: ${esc(d.error)}</p>
+    <div><button type="button" class="ghost" id="sl-reload">Load slides again</button></div>`;
+  else if (d.state === "none") body = `<p class="muted">${esc(slideReason(d.reason) || "No slides for this lecture yet.")}</p>`;
+  else if (d.state === "waiting") {
+    const unchecked = /^not checked yet$/i.test(d.reason || "");
+    const reason = unchecked && slideCanvas.get(+id)
+      ? "No deck is matched yet. Canvas decks are matched on the course’s next scan. Look for slides to check now, or attach one below."
+      : slideReason(d.reason) || "Waiting to line the slides up with the transcript.";
+    body = `${deckLine}<p class="muted">${esc(reason)}</p>${unchecked ? `<div><button type="button" id="sl-check">Look for slides</button></div>` : ""}`;
+  }
+  else if (d.state === "aligning") {
+    const ocr = /^reading screen/i.test(d.progress || "");  // no deck matched, so the server reads the video itself
+    body = `${deckLine}<div class="job"><span class="sweep" aria-hidden="true"></span>
+    <span class="job-what">${ocr ? "Reading slides off the video" : "Lining slides up with the transcript"}</span><span class="muted job-detail">${
+      /^aligning$/i.test(d.progress || "") ? "" : esc(d.progress || "starting…")}</span></div>${
+      ocr ? `<p class="muted small">Reading a whole video can take half an hour. It keeps going if you leave this page.</p>` : ""}`;
+  }
+  else if (d.state === "error") body = `${deckLine}<div class="banner bad" style="margin:0"><b>The slides couldn’t be lined up.</b> ${esc(d.error)}</div>
+    <div><button type="button" id="sl-align">Line them up again</button></div>`;
+  else {
+    const skipped = d.slides.filter(s => s.first == null).length;
+    body = `${deckLine}${skipped ? `<p class="muted">${plural(skipped)} never came up in the recording.</p>` : ""}${
+      deferred ? `<div><button type="button" class="ghost" id="sl-show">Show slides in the transcript</button></div>` : ""}`;
+  }
+  if (d.state !== "aligned" && deferred) body += `<div><button type="button" class="ghost" id="sl-show">Update the transcript</button></div>`;
+  const others = (d.candidates || []).filter(c => c.id !== deck?.id);
+  const label = c => c.status === "error" ? `${c.title} (couldn’t be read)` : c.status === "new" ? `${c.title} (downloading…)`
+    : `${c.title} (${pageCount(c.pages)}${c.matched_lecture && c.matched_lecture.id != id ? `, already used by ${c.matched_lecture.title}` : ""})`;
+  const picker = deck || others.length ? `<label class="field">Deck <select id="sl-deck">
+      ${deck ? `<option value="${esc(deck.id)}" selected>${esc(label({ ...deck, matched_lecture: null }))}</option>` : ""}
+      ${others.map(c => `<option value="${esc(c.id)}" ${c.status === "error" ? "disabled" : ""}>${esc(label(c))}</option>`).join("")}
+      <option value="none" ${deck ? "" : "selected"}>No slides for this lecture</option></select></label>
+    <div><button type="button" id="sl-use" hidden>Use this deck</button></div>` : "";
+  const controls = d.state === "unavailable" ? "" : `<div class="slide-controls">${picker}
+    <div><button type="button" class="ghost" id="sl-attach">Attach a PDF or PPTX</button>
+    <input type="file" id="sl-file" class="vh" tabindex="-1" aria-hidden="true" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation"></div></div>
+    <p class="field-error" id="sl-err" hidden></p>`;
+  return `<section class="sec" id="slides-sec" data-state="${esc(d.state)}"><div class="sec-head"><h3>Slides</h3></div>
+    <div class="slides-state" id="sl-status" tabindex="-1">${body}</div>${controls}</section>`;
+}
+// User actions: polls wait while one is in flight, and its answer beats any poll that was already on the way.
+async function slidesAction(id, path, opts) {
+  slides.busy++; const n = ++slides.req;
+  try { const d = await api(`/api/lectures/${id}/slides${path}`, opts); return n === slides.req ? d : await api(`/api/lectures/${id}/slides`); }
+  finally { slides.busy--; if (!slides.busy && slides.id === id) schedulePoll(id, slides.data); }  // a failed action mustn't end polling
+}
+function bindSlidesSection(id) {
+  if (!$("#slides-sec")) return;
+  const clearErr = () => { if ($("#sl-err")) $("#sl-err").hidden = true;
+    $$('[aria-describedby="sl-err"]').forEach(el => el.removeAttribute("aria-describedby")); };
+  const fail = (sel, msg) => {  // looked up again: the section may have been redrawn while the request ran
+    const err = $("#sl-err"), el = $(sel); if (!err) return toast(msg, 5000);
+    err.textContent = msg; err.hidden = false; el?.setAttribute("aria-describedby", "sl-err"); el?.focus(); };
+  const reset = (sel, label) => { const b = $(sel); if (b) { b.disabled = false; if (label) b.textContent = label; } };
+  if ($("#sl-reload")) $("#sl-reload").onclick = () => refreshSlides(id, true);
+  if ($("#sl-show")) $("#sl-show").onclick = () => renderKeepingPlace("#slides-sec");
+  for (const b of [$("#sl-align"), $("#sl-check")].filter(Boolean)) b.onclick = async () => {
+    const label = b.textContent; b.disabled = true; b.textContent = "Starting…";
+    try { await applySlides(id, await slidesAction(id, "/align", { method: "POST" }), false, "#slides-sec"); $("#sl-status")?.focus(); }
+    catch (x) { reset(`#${b.id}`, label); toast(x.message, 5000); }
+  };
+  // Choosing in the list only selects (arrow keys on a closed select fire change on every step); the button commits it.
+  const sel = $("#sl-deck"), use = $("#sl-use"), current = () => String(slides.data?.deck?.id ?? "none");
+  if (sel) sel.onchange = () => {
+    const v = sel.value; use.hidden = v === current();
+    use.textContent = v === "none" ? "Remove slides" : "Use this deck"; use.classList.toggle("danger", v === "none");
+  };
+  if (use) use.onclick = async () => {
+    const v = sel.value; if (v === current()) return;
+    if (v === "none" && !await confirmDanger("Remove the slides from this lecture?",
+      "The slide markers and the slide panel go away. You can pick this deck again from the list.", "Remove slides")) return;
+    use.disabled = true; use.textContent = v === "none" ? "Removing…" : "Switching…"; clearErr();
+    try {
+      const d = await slidesAction(id, "", { method: "PUT", body: { deck_id: v === "none" ? null : +v } });
+      toast(v === "none" ? "Slides removed from this lecture" : `Slides changed to ${d.deck?.title ?? "the new deck"}`);
+      await applySlides(id, d, true, "#slides-sec"); $("#sl-deck")?.focus();
+    } catch (x) { reset("#sl-use", v === "none" ? "Remove slides" : "Use this deck"); fail("#sl-deck", x.message); }
+  };
+  const btn = $("#sl-attach"), input = $("#sl-file");
+  if (btn) btn.onclick = () => input.click();
+  if (input) input.onchange = async () => {
+    const f = input.files[0]; if (!f) return;
+    input.value = "";  // so picking the same file again still counts as a change
+    clearErr();
+    if (!/\.(pdf|pptx)$/i.test(f.name)) return fail("#sl-attach", `${f.name} isn’t a PDF or PPTX. Export the slides as PDF and attach that.`);
+    const fd = new FormData(); fd.append("file", f);
+    btn.disabled = true; btn.textContent = "Attaching…";
+    try { const d = await slidesAction(id, "", { method: "POST", body: fd }); toast(`Attached ${d.deck?.title ?? f.name}`);
+      await applySlides(id, d, true, "#slides-sec"); reset("#sl-attach", "Attach a PDF or PPTX"); $("#sl-attach")?.focus(); }
+    catch (x) { reset("#sl-attach", "Attach a PDF or PPTX"); fail("#sl-attach", x.message); }
+  };
+}
+function schedulePoll(id, d) {
+  clearTimeout(slides.poll);
+  if (d && (d.state === "aligning" || d.state === "waiting"))
+    slides.poll = setTimeout(() => refreshSlides(id), d.state === "aligning" ? 3000 : 15000);
+}
+// Swap in a new slides state: the section updates in place; the transcript re-renders once alignment lands, unless that would
+// interrupt playback or throw away unsaved details (then the section offers "Show slides in the transcript").
+async function applySlides(id, d, force = false, prefer) {
+  if (location.hash !== `#/lecture/${id}`) return;
+  const was = slides.data?.state, marked = !!$(".slide-mark"), want = d?.state === "aligned";
+  setSlides(id, d);
+  if (was && d && was !== d.state) $("#sl-live").textContent = SLIDE_SAY[d.state] || "";
+  const p = $("#player");
+  if (marked !== want || (want && (was !== "aligned" || force))) {
+    if (!dirty.size && (p?.paused ?? true)) return renderKeepingPlace(prefer);
+    slides.deferred = true;  // the section offers to update the transcript instead of interrupting playback or unsaved edits
+  }
+  const sec = $("#slides-sec"), html = slidesSection(d, id);
+  if (sec && html !== slides.html) {
+    const focused = sec.contains(document.activeElement) ? document.activeElement.id : null;
+    sec.outerHTML = html; bindSlidesSection(id);
+    if (focused && $(`#${focused}`)) $(`#${focused}`).focus();
+  }
+  slides.html = html;
+  schedulePoll(id, d);
+}
+async function refreshSlides(id, loud = false) {
+  if (location.hash !== `#/lecture/${id}`) return;
+  if (slides.busy && !loud) return schedulePoll(id, slides.data);  // an upload or deck change is in flight: its answer wins
+  const n = ++slides.req;
+  const stale = () => { if (slides.id === id && !slides.busy) schedulePoll(id, slides.data); };  // overtaken: keep the clock running
+  try { const d = await api(`/api/lectures/${id}/slides`); if (n === slides.req) await applySlides(id, d); else stale(); }
+  catch (e) {
+    if (e.status === 404) return;
+    if (n !== slides.req) return stale();
+    // A failed poll (the server restarting, say) keeps what's shown and tries again; only a load the user asked for says it failed.
+    if (!loud && slides.data && slides.data.state !== "unavailable") return schedulePoll(id, slides.data);
+    if (loud) toast(e.message, 5000);
+    applySlides(id, { state: "unavailable", error: e.message, slides: [], candidates: [] });
+  }
+}
+
+// Full-size viewer: Previous/Next (arrow keys), play from the slide's first appearance, jump to any later stretch.
+const setSlideParam = no => { const u = new URL(location.href);
+  no ? u.searchParams.set("slide", no) : u.searchParams.delete("slide"); history.replaceState(history.state, "", u); };
+function openSlide(no) {
+  const d = slides.data, s = slides.byNo.get(no); if (!s) return;
+  slides.viewing = no; setSlideParam(no);
+  $("#slide-dlg-h").textContent = slideName(s);
+  $("#slide-dlg-n").textContent = `Slide ${s.no} of ${d.deck.pages}`;
+  const img = $("#slide-dlg-img"); img.hidden = false; $("#slide-dlg-missing").hidden = true;
+  img.style.aspectRatio = slideAr(d); img.alt = `Slide ${s.no}: ${slideName(s)}`; img.src = s.image;
+  const play = $("#slide-play"), later = (s.ranges || []).slice(1);
+  play.disabled = s.first == null;
+  play.textContent = s.first == null ? "Not shown in this recording" : `Play from ${fmtTs(s.first)}`;
+  const also = $("#slide-dlg-also"); also.hidden = !later.length;
+  also.innerHTML = later.length ? `<span>Also on screen at</span>${later.map(r =>
+    `<button type="button" class="ts" data-jump="${+r[0]}" aria-label="Play from ${fmtTs(r[0])}">${fmtTs(r[0])}</button>`).join("")}` : "";
+  $("#slide-prev").disabled = !slides.byNo.has(no - 1); $("#slide-next").disabled = !slides.byNo.has(no + 1);
+  if (!$("#slide-dlg").open) {  // start on the main action, not on whichever small button comes first
+    $("#slide-dlg").showModal();
+    (play.disabled ? ($("#slide-next").disabled ? $("#slide-close") : $("#slide-next")) : play).focus();
+  } else if (document.activeElement?.disabled || !$("#slide-dlg").contains(document.activeElement)) $("#slide-close").focus();
+}
+$("#slide-dlg-img").addEventListener("error", e => { if (!e.target.getAttribute("src")) return; e.target.hidden = true; $("#slide-dlg-missing").hidden = false; });
+$("#slide-prev").onclick = () => openSlide(slides.viewing - 1);
+$("#slide-next").onclick = () => openSlide(slides.viewing + 1);
+$("#slide-close").onclick = () => $("#slide-dlg").close();
+const playSlideAt = t => { $("#slide-dlg").close(); seek(t); };
+$("#slide-play").onclick = () => { const s = slides.byNo.get(slides.viewing); if (s?.first != null) playSlideAt(s.first); };
+$("#slide-dlg-also").onclick = e => { const b = e.target.closest("[data-jump]"); if (b) playSlideAt(+b.dataset.jump); };
+$("#slide-dlg").addEventListener("keydown", e => {
+  if (e.target.closest("select, input")) return;
+  if (e.key === "ArrowLeft" && !$("#slide-prev").disabled) { e.preventDefault(); openSlide(slides.viewing - 1); }
+  if (e.key === "ArrowRight" && !$("#slide-next").disabled) { e.preventDefault(); openSlide(slides.viewing + 1); }
+});
+$("#slide-dlg").addEventListener("close", () => { $("#slide-dlg-img").removeAttribute("src"); setSlideParam(null); });
+document.addEventListener("click", e => { const b = e.target.closest("[data-open-slide]"); if (b && !b.classList.contains("missing")) openSlide(+b.dataset.openSlide); });
+// A thumbnail that 404s (e.g. the deck is being re-extracted) becomes a labelled placeholder of the same size.
+document.addEventListener("error", e => {
+  const img = e.target; if (!(img instanceof HTMLImageElement) || !img.parentElement?.matches(".slide-img")) return;
+  const b = img.parentElement; b.classList.add("missing"); b.removeAttribute("aria-label");
+  const s = slides.byNo.get(+b.dataset.openSlide);
+  b.setAttribute("aria-disabled", "true"); b.textContent = `Slide ${b.dataset.openSlide}${s?.title ? `, ${s.title}` : ""}: image not available yet`;
+}, true);
+
+// ---- notes: written by Claude from the transcript and slides. They hang off the transcript's timestamp gutter,
+// so a point and the moment it was said line up. The server's Markdown is escaped first; only its conventions are rendered.
+const notes = { id: null, data: null, poll: 0, req: 0, next: null };
+const CALLOUT = { exam: "On the exam", emphasis: "Emphasized in class", unclear: "Unclear in the recording", check: "Check this" };
+const LANG = { java: "Java", kotlin: "Kotlin", python: "Python", haskell: "Haskell", bnf: "BNF", ebnf: "EBNF", js: "JavaScript", javascript: "JavaScript" };
+const JUMP = /\[▶ ([\d:]+)\]\(#t=(\d+(?:\.\d+)?)\)/;
+const jumpBtn = (label, t) => `<button type="button" class="ts" data-seek="${+t}" aria-label="Play from ${esc(label)}">${esc(label)}</button>`;
+const slideList = nos => {  // [7,8,9,12] -> "Slides 7 to 9 and 12"
+  nos = nos.map(Number).filter(Number.isInteger); const runs = []; for (const n of [...new Set(nos)].sort((a, b) => a - b)) {
+    const r = runs.at(-1); r && n === r[1] + 1 ? r[1] = n : runs.push([n, n]); }
+  const parts = runs.map(([a, b]) => a === b ? `${a}` : b === a + 1 ? `${a} and ${b}` : `${a} to ${b}`);
+  return `${nos.length > 1 ? "Slides" : "Slide"} ${parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0]}`;
+};
+function mdInline(src, ctx) {
+  const keep = [], hold = html => `\u0000${keep.push(html) - 1}\u0000`;  // code, math and jumps are set aside so nothing inside them gets formatted
+  let s = String(src ?? "").replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_, c) => hold(`<code>${esc(c)}</code>`))
+    .replace(/\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, m) => hold(`<span class="math" data-tex="${esc(m)}">${esc(m)}</span>`))
+    .replace(new RegExp(JUMP.source, "g"), (_, l, t) => hold(jumpBtn(l, t)));
+  s = esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/(^|[^\w*])\*(?![\s*])(.+?)\*(?!\w)/g, "$1<i>$2</i>")
+    .replace(/\((Slides? )(\d+)( to \d+)?\)/g, (m, w, a, b) => ctx.slides?.has(+a)
+      ? `(<button type="button" class="link" data-open-slide="${a}">${w}${a}${b || ""}</button>)` : m);
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[i]);
+}
+function md(src, ctx = {}) {
+  const lines = String(src || "").replace(/\r/g, "").split("\n"), out = [];
+  const isBlock = l => /^(```|###\s|>|\s*[-*]\s|\s*\$\$)/.test(l);
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i]; let m;
+    if ((m = line.match(/^```\s*([^\s`]*)/))) {  // ```java, ```c#, ```{.java}, ```java title=x: any fence opens a block
+      const body = []; for (i++; i < lines.length && !/^```\s*$/.test(lines[i]); i++) body.push(lines[i]);
+      i++; const raw = m[1].replace(/[^\w+#-]/g, "").toLowerCase(), lang = Object.hasOwn(LANG, raw) ? LANG[raw] : raw;
+      out.push(`<div class="code-block">${lang ? `<span class="lang">${esc(lang)}</span>` : ""}<pre tabindex="0"${lang ? ` aria-label="${esc(lang)} code"` : ""}><code>${esc(body.join("\n"))}</code></pre></div>`);
+    } else if (/^\s*\$\$/.test(line)) {
+      const body = [line.trim().slice(2)]; let end = /\$\$\s*$/.test(body[0]) && body[0].length > 1;
+      for (i++; !end && i < lines.length; i++) { body.push(lines[i]); end = /\$\$\s*$/.test(lines[i]); }
+      const tex = body.join("\n").replace(/\$\$\s*$/, "").trim();
+      out.push(`<div class="math display" data-tex="${esc(tex)}">${esc(tex)}</div>`);
+    } else if ((m = line.match(/^###\s+(.*)/))) { out.push(`<h5>${mdInline(m[1], ctx)}</h5>`); i++; }
+    else if (/^>/.test(line)) {
+      const body = []; for (; i < lines.length && /^>/.test(lines[i]); i++) body.push(lines[i].replace(/^>\s?/, ""));
+      const c = body[0].match(/^\[!(exam|emphasis|unclear|check)\]\s*(.*)$/i), inner = { ...ctx, inline: true };
+      out.push(c ? `<div class="callout" data-kind="${c[1].toLowerCase()}" role="note"><p class="callout-label">${CALLOUT[c[1].toLowerCase()]}</p>${
+        md([c[2], ...body.slice(1)].join("\n").trim(), inner)}</div>` : `<blockquote>${md(body.join("\n"), inner)}</blockquote>`);
+    } else if (/^\s*[-*]\s+/.test(line)) {
+      const items = [];
+      for (; i < lines.length && lines[i].trim() && (/^\s*[-*]\s+/.test(lines[i]) || !isBlock(lines[i])); i++)
+        /^\s*[-*]\s+/.test(lines[i]) ? items.push(lines[i].replace(/^\s*[-*]\s+/, "")) : items[items.length - 1] += " " + lines[i].trim();
+      out.push(`<ul>${items.map(t => `<li>${mdInline(t, ctx)}</li>`).join("")}</ul>`);
+    } else if (!line.trim()) i++;
+    else {
+      const buf = [lines[i++].trim()]; for (; i < lines.length && lines[i].trim() && !isBlock(lines[i]); i++) buf.push(lines[i].trim());
+      const text = buf.join(" "), j = !ctx.inline && text.match(new RegExp(`^${JUMP.source}:?\\s*`));
+      out.push(j ? `<div class="np">${jumpBtn(j[1], j[2])}<p>${mdInline(text.slice(j[0].length), ctx)}</p></div>` : `<p>${mdInline(text, ctx)}</p>`);
+    }
+  }
+  return out.join("");
+}
+
+let katexLoad = null;  // KaTeX only loads when a note actually has math in it
+function renderMath(root) {
+  const els = $$(".math", root); if (!els.length) return;
+  katexLoad ||= new Promise((ok, no) => {
+    const css = Object.assign(document.createElement("link"), { rel: "stylesheet", href: "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" });
+    const js = Object.assign(document.createElement("script"), { src: "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js", onload: ok, onerror: no });
+    document.head.append(css, js);
+  });
+  katexLoad.then(() => els.forEach(el => { if (el.dataset.done) return;
+    try { katex.render(el.dataset.tex, el, { throwOnError: false, displayMode: el.classList.contains("display") }); el.dataset.done = 1; } catch {} }),
+    () => { katexLoad = null; });  // offline: the TeX source stays readable, and the next render tries again
+}
+
+const notesBusy = n => ["queued", "writing", "waiting_quota"].includes(n?.state);
+const notesDone = n => !!n?.sections?.length;
+function noteSection(s, i, ctx) {
+  const n = i + 1, refs = (s.slides || []).map(Number).filter(Number.isInteger), ref = refs.length ? slideList(refs) : "";
+  return `<article class="note-sec" id="note-sec-${n}" data-kind="${esc(s.kind)}" aria-labelledby="note-h-${n}">
+    <div class="note-head">${s.start != null ? jumpBtn(fmtTs(s.start), s.start) : "<span></span>"}<div>
+      <h4 id="note-h-${n}">${esc(s.title)}</h4>
+      ${s.kind === "logistics" || ref ? `<p class="note-meta">${s.kind === "logistics" ? "<span>Class logistics</span>" : ""}${
+        !ref ? "" : ctx.slides?.has(refs[0]) ? `<button type="button" class="link" data-open-slide="${refs[0]}">${ref}</button>` : `<span>${ref}</span>`}</p>` : ""}
+      ${s.gist ? `<p class="note-gist">${mdInline(s.gist, { ...ctx, slides: null })}</p>` : ""}</div></div>
+    <div class="note-body">${md(s.markdown, ctx)}</div></article>`;
+}
+function notesState(n, l) {
+  const hasText = l.segment_count > 0, slidesToo = slides.data?.state === "aligned" ? " and slides" : "";
+  if (n.state === "unavailable") return `<p class="err">Notes didn’t load: ${esc(n.error)}</p>
+    <div><button type="button" class="ghost" id="nt-reload">Load notes again</button></div>`;
+  if (n.state === "queued") return `<div class="job"><span class="sweep" aria-hidden="true"></span><span class="job-what">Waiting to write notes</span>
+    <span class="muted job-detail">Notes are written one lecture at a time.</span></div>`;
+  if (n.state === "writing") return `<div class="job"><span class="sweep" aria-hidden="true"></span><span class="job-what">Writing notes</span>
+    <span class="muted job-detail">${esc(n.progress || "starting…")}</span></div>`;
+  if (n.state === "waiting_quota") {
+    const at = n.retry_at ? new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(utc(n.retry_at)) : "";
+    return `<div class="banner" style="margin:0"><b>Claude’s usage limit is reached.</b> ${at ? `Writing picks up again at ${esc(at)}.` : "Writing picks up again once it resets."}
+      <div class="row" style="margin-top:12px"><button type="button" class="ghost" id="nt-offline">Write offline notes instead</button></div></div>`;
+  }
+  if (n.state === "error") return `<div class="banner bad" style="margin:0"><b>The notes couldn’t be written.</b> ${esc(n.error)}
+    <div class="row" style="margin-top:12px"><button type="button" id="nt-write">Try again</button>
+      <button type="button" class="ghost" id="nt-offline">Write offline notes</button></div></div>`;
+  if (notesDone(n)) return n.stale ? `<div class="banner" style="margin:0">${esc(n.stale_reason || "These notes were written from an older transcript or other slides.")}
+    <div class="row" style="margin-top:12px"><button type="button" id="nt-write">Write the notes again</button></div></div>` : "";
+  if (!hasText) return `<p class="muted">Notes are written once the lecture is transcribed.</p>`;
+  return `<p class="muted">No notes yet. Claude writes them from the transcript${slidesToo}: a summary, notes for each part of the lecture, flashcards and a quiz. It takes a few minutes.</p>
+    <div class="row"><button type="button" id="nt-write">Write notes</button><button type="button" class="ghost" id="nt-offline">Write offline notes</button></div>
+    <p class="hint">Offline notes don’t use Claude. They’re quicker and plainer.</p>`;
+}
+function notesPane(n, l) {
+  const top = notesState(n, l);
+  if (!notesDone(n)) return top;
+  const ctx = { slides: slides.data?.state === "aligned" ? slides.byNo : null }, id = l.id, secs = n.sections;
+  const cards = +n.cards || 0, quiz = +n.quiz || 0, removed = +n.removed || 0, flagged = +n.flagged || 0;
+  const kept = n.issues?.length ? `<details class="note-issues"><summary>What the check changed: ${[
+      removed && `removed ${removed} ${removed === 1 ? "claim" : "claims"}`, flagged && `flagged ${flagged}`].filter(Boolean).join(", ") || "nothing"}</summary>
+      <ul>${n.issues.map(x => { const [, what, k] = (x.where || "").match(/^(section|card|quiz) (\d+)/i) || [], gone = x.verdict === "removed";
+        const where = what === "section" && secs[k - 1] ? `<a href="?section=${k}#/lecture/${id}" data-section="${k}">${esc(secs[k - 1].title)}</a>`
+          : what === "card" ? `flashcard ${k}` : what === "quiz" ? `quiz question ${k}` : esc(x.where || "");
+        return `<li><b>${gone ? "Removed" : "Flagged"}</b>${where ? ` ${gone ? "from" : "in"} ${where}` : ""}:
+          <span class="claim${x.verdict === "removed" ? " gone" : ""}">${mdInline(x.claim, {})}</span> <span class="muted">${mdInline(x.reason, {})}</span></li>`; }).join("")}</ul></details>` : "";
+  const counts = [cards && `<a href="?lecture=${+id}#/review">${cards} ${cards === 1 ? "flashcard" : "flashcards"}</a>`, quiz && `<a href="#/quiz/${+id}">${quiz} quiz ${quiz === 1 ? "question" : "questions"}</a>`].filter(Boolean);
+  return `<h3 class="vh">Notes</h3>${top ? `<div class="notes-top">${top}</div>` : ""}
+    ${n.summary ? `<div class="notes-sum note-body"><h4 class="notes-h">In short</h4>${md(n.summary, ctx)}</div>` : ""}
+    <nav class="notes-toc" aria-labelledby="toc-h"><h4 class="notes-h" id="toc-h">In this lecture</h4><ol>${secs.map((s, i) => `<li${s.kind === "logistics" ? ' class="logistics"' : ""}>
+      <span class="num">${s.start != null ? fmtTs(s.start) : ""}</span><a href="?section=${i + 1}#/lecture/${id}" data-section="${i + 1}">${esc(s.title)}</a></li>`).join("")}</ol></nav>
+    ${secs.map((s, i) => noteSection(s, i, ctx)).join("")}
+    ${n.open_questions?.length ? `<section class="note-sec" aria-labelledby="oq-h"><div class="note-head"><span></span><h4 id="oq-h">Questions the lecture left open</h4></div>
+      <div class="note-body"><ul>${n.open_questions.map(q => `<li>${mdInline(q, ctx)}</li>`).join("")}</ul></div></section>` : ""}
+    <div class="notes-foot">${kept}
+      <p class="hint">${n.generator === "offline" ? "Written offline from the transcript, without Claude" : "Written by Claude and checked against the transcript"}${
+        n.created_at ? `, ${esc(fmtWhen(n.created_at))}` : ""}.${counts.length ? ` ${counts.join(" and ")}.` : ""}</p>
+      ${top && !cards ? "" : `<div class="row">${cards ? `<a class="btn ghost" href="/api/anki.tsv?lecture_id=${+id}" download>Download flashcards for Anki</a>` : ""}${
+        top ? "" : `<button type="button" class="ghost" id="nt-write">Write the notes again</button>`}</div>`}</div>`;
+}
+function safeNotesPane(n, l) {
+  try { return notesPane(n, l); }
+  catch (x) { console.error(x); return notesState({ state: "unavailable", error: "the notes came back in a shape this page can’t read" }, l); }
+}
+const notchesHtml = (secs, dur) => !dur || !secs?.length ? "" : secs.slice(1).filter(s => s.start != null)
+  .map(s => `<span class="notch" style="--x:${Math.min(Math.max(+s.start / dur, 0), 1).toFixed(4)}"></span>`).join("");
+
+function setNoteParam(key, v) { const u = new URL(location.href); v == null ? u.searchParams.delete(key) : u.searchParams.set(key, v);
+  history.replaceState(history.state, "", u); }
+function showTab(name, push) {
+  const tabs = $$("#lec-tabs [role=tab]"); if (!tabs.length) return;
+  tabs.forEach(t => { const on = t.dataset.tab === name; t.classList.toggle("on", on); t.setAttribute("aria-selected", on); t.tabIndex = on ? 0 : -1;
+    $(`#${t.getAttribute("aria-controls")}`).hidden = !on; });
+  if (push) setNoteParam("tab", name);
+  if (name === "transcript") {  // coming back to the transcript: put the playing line in view again
+    const now = $("#transcript .seg.now"); follow = true;
+    if (now) { autoScroll(); now.scrollIntoView({ block: "center" }); }
+  }
+}
+function goSection(n) {
+  const el = $(`#note-sec-${n}`); if (!el) return;
+  showTab("notes", true); autoScroll(); el.scrollIntoView({ block: "start" }); markToc();
+  const h = $("h4", el); h.tabIndex = -1; h.focus({ preventScroll: true });
+}
+async function writeNotes(id, mode, btn, force = false) {
+  // Out-of-date notes re-run Claude, so reworded flashcards lose their place; unchanged notes are all cache hits and keep everything.
+  if (mode === "claude" && notesDone(notes.data) && notes.data.stale && !await confirmDanger("Write the notes again?",
+    "Flashcards with new wording start over. Flashcards that stay the same keep their progress.", "Write them again")) return;
+  const label = btn?.textContent; if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
+  notes.req++;
+  try {
+    const d = await api(`/api/lectures/${id}/notes`, { method: "POST", body: force ? { mode, force: true } : { mode } });
+    toast(mode === "offline" ? "Writing offline notes…" : "Notes queued. Claude writes them in the background.");
+    applyNotes(id, d);
+  } catch (x) {
+    if (x.status === 409 && mode === "offline" && !force) {
+      if (await confirmDanger("Replace Claude’s notes with offline notes?", x.message, "Replace anyway")) writeNotes(id, mode, btn, true);
+    } else toast(x.message, 6000);
+  } finally { if (btn?.isConnected) { btn.disabled = false; btn.textContent = label; } }
+}
+function bindNotes(id) {
+  const pane = $("#pane-notes"); if (!pane) return;
+  if ($("#nt-write", pane)) $("#nt-write", pane).onclick = e => writeNotes(id, "claude", e.currentTarget);
+  if ($("#nt-offline", pane)) $("#nt-offline", pane).onclick = e => writeNotes(id, "offline", e.currentTarget);
+  if ($("#nt-reload", pane)) $("#nt-reload", pane).onclick = () => refreshNotes(id, true);
+  renderMath(pane);
+}
+function scheduleNotes(id, d) {
+  if (id !== notes.id) return;
+  clearTimeout(notes.poll);
+  if (notesBusy(d)) notes.poll = setTimeout(() => refreshNotes(id), d.state === "waiting_quota" ? 60000 : 4000);
+}
+async function refreshNotes(id, loud) {
+  const mine = ++notes.req;
+  try { const d = await api(`/api/lectures/${id}/notes`); if (mine === notes.req) applyNotes(id, d); }
+  catch (x) { if (loud) toast(x.message, 5000); else if (mine === notes.req) scheduleNotes(id, notes.data); }
+}
+function applyNotes(id, d) {
+  if (location.hash !== `#/lecture/${id}` || !$("#pane-notes")) return;
+  if (id !== notes.id) return;
+  const was = notes.data; notes.data = d;
+  const l = { id, segment_count: $$("#transcript .seg").length };
+  if (JSON.stringify(was) !== JSON.stringify(d)) {
+    const focused = document.activeElement?.id;
+    $("#pane-notes").innerHTML = safeNotesPane(d, l); bindNotes(id);
+    $(".notches") && ($(".notches").innerHTML = notchesHtml(d.sections, +$("#scrub")?.dataset.dur));
+    if (focused && $(`#${CSS.escape(focused)}`)) $(`#${CSS.escape(focused)}`).focus({ preventScroll: true });
+    if (was && d.state !== was.state) $("#sl-live").textContent = { done: "Notes are ready.", error: "The notes couldn’t be written.",
+      writing: "Writing notes.", waiting_quota: "Claude’s usage limit is reached; notes will wait." }[d.state] || "";
+  }
+  scheduleNotes(id, d);
+}
+// ---- review: flashcards one at a time, Leitner boxes (1, 2, 4, 8, 16 days). Answers save as you go; the last one can be undone.
+const rv = { d: null, cards: [], i: 0, shown: false, undo: null, scope: {}, saving: 0, answered: 0, seq: 0, undoing: false, next: null };
+const cardText = s => String(s ?? "").replace(new RegExp(JUMP.source + "\\s*:?\\s*", "g"), "");  // jump links only work on the lecture page
+const BOX_EVERY = ["Every day", "Every 2 days", "Every 4 days", "Every 8 days", "Every 16 days"];
+function clozeHtml(front, reveal) {  // Anki cloze: {{c1::answer}} or {{c1::answer::hint}}
+  return String(front ?? "").split(/(\{\{c\d+::[\s\S]*?\}\})/).map(p => {
+    const m = p.match(/^\{\{c\d+::([\s\S]*?)(?:::([\s\S]*?))?\}\}$/);
+    return !m ? mdInline(cardText(p), {}) : reveal ? `<b class="cloze on">${mdInline(m[1], {})}</b>`
+      : `<span class="cloze">${m[2] ? esc(m[2]) : "…"}</span><span class="vh">(blank)</span>`;
+  }).join("");
+}
+const boxStrip = (boxes, cur) => `<div class="boxes" role="group" aria-label="Your flashcards by box">${(boxes || [0, 0, 0, 0, 0]).map((n, i) =>
+  `<div class="${cur === i + 1 ? "on" : ""}"><b>${+n || 0}</b><span class="long">${BOX_EVERY[i]}${cur === i + 1 ? `<span class="vh">, this card’s box</span>` : ""
+    }</span><span class="short" aria-hidden="true">${2 ** i} ${i ? "days" : "day"}</span></div>`).join("")}</div>`;
+const rvSub = d => +d.due || +d.new ? `${+d.due || 0} due and ${+d.new || 0} new` : "Nothing due right now";
+function rvLeft(c, step) { const k = c.due ? "due" : "new"; rv.d[k] = Math.max(0, (+rv.d[k] || 0) + step); }  // the header counts follow the session
+function rvCard() {
+  const c = rv.cards[rv.i], d = rv.d;
+  if (!c) {
+    const all = (d.boxes || []).reduce((a, b) => a + (+b || 0), 0);
+    if (!all && !rv.i) return `<div class="empty"><h3>No flashcards yet</h3><p>Flashcards are written with each lecture’s notes. Open a transcribed lecture and write its notes to get some.</p>
+      <a class="btn" href="#/">Go to the Library</a></div>`;
+    return `<div class="rv-done"><h3 tabindex="-1" id="rv-done-h">${rv.i ? "That’s everything due" : "Nothing is due"}</h3>
+      <p class="muted">${rv.answered ? `You answered ${rv.answered} ${rv.answered === 1 ? "card" : "cards"}. ` : ""}${all} ${all === 1 ? "card is" : "cards are"} in your boxes; each comes back when its box says.</p>
+      ${rv.scope.lecture ? `<p><a href="#/lecture/${rv.scope.lecture.id}">Back to ${esc(rv.scope.lecture.title)}</a></p>` : ""}</div>`;
+  }
+  const cloze = c.kind === "cloze", left = rv.cards.length - rv.i;
+  return `<article class="flash" data-kind="${esc(c.kind)}" aria-labelledby="rv-q">
+    <p class="flash-meta">${c.course_code ? `<span class="code" translate="no">${esc(c.course_code)}</span>` : ""}
+      ${c.lecture_title ? `<a href="#/lecture/${+c.lecture_id}">${esc(c.lecture_title)}</a>` : ""}
+      <span>${c.due ? `Box ${+c.box}` : "New card"}</span><span class="rv-left">${left} to go</span></p>
+    <div class="flash-q" id="rv-q" tabindex="-1">${cloze ? clozeHtml(c.front, rv.shown) : mdInline(cardText(c.front), {})}</div>
+    ${rv.shown ? `<div class="flash-a" id="rv-a" tabindex="-1">${c.back ? `<p>${mdInline(cardText(c.back), {})}</p>` : ""}
+      ${c.t != null && c.lecture_id ? `<p class="small"><a href="?t=${+c.t}#/lecture/${+c.lecture_id}">Hear it in the lecture at ${fmtTs(c.t)}</a></p>` : ""}</div>
+    <div class="flash-actions"><button type="button" class="ghost" id="rv-miss" aria-keyshortcuts="1">Missed it<kbd aria-hidden="true">1</kbd></button>
+      <button type="button" id="rv-got" aria-keyshortcuts="2">Got it<kbd aria-hidden="true">2</kbd></button></div>`
+    : `<div class="flash-actions"><button type="button" id="rv-show" aria-keyshortcuts="Space">Show answer<kbd aria-hidden="true">Space</kbd></button></div>`}
+  </article>`;
+}
+const rvUndoHtml = () => !rv.undo ? "" : `<p class="rv-undo" id="rv-undo-row"><span>${esc(rv.undo.msg)}</span>${rv.undo.before
+  ? `<button type="button" class="ghost" id="rv-undo" aria-keyshortcuts="U">Undo<kbd aria-hidden="true">U</kbd></button>` : ""}</p>`;
+function rvDraw(focus) {
+  const stage = $("#rv-stage"); if (!stage) return;
+  if (!focus && stage.contains(document.activeElement) && document.activeElement.id) focus = `#${document.activeElement.id}`;  // a redraw keeps your place
+  stage.innerHTML = rvCard() + rvUndoHtml();
+  $("#rv-boxes").innerHTML = boxStrip(rv.d.boxes, rv.cards[rv.i]?.due ? +rv.cards[rv.i].box : null);
+  $("#rv-boxes").hidden = !rv.cards.length && !(rv.d.boxes || []).some(n => +n);  // five zeros say nothing
+  $("#rv-sub").textContent = rvSub(rv.d);
+  $("#rv-show") && ($("#rv-show").onclick = () => { rv.shown = true; rvDraw("#rv-a"); });
+  $("#rv-got") && ($("#rv-got").onclick = () => rvAnswer(true));
+  $("#rv-miss") && ($("#rv-miss").onclick = () => rvAnswer(false));
+  $("#rv-undo") && ($("#rv-undo").onclick = rvUndo);
+  renderMath(stage);
+  const f = focus && $(focus); if (f) f.focus({ preventScroll: !f.matches("#rv-q, #rv-done-h") });
+}
+const rvSay = msg => { $("#sl-live").textContent = msg; };  // focus is already on the next card, so the outcome is announced
+async function rvAnswer(correct) {
+  const c = rv.cards[rv.i], d = rv.d; if (!c || !rv.shown || rv.undoing) return;
+  const mine = ++rv.seq;
+  rv.i++; rv.shown = false; rv.undo = { msg: "Saving…" }; rv.saving++; rvLeft(c, -1);  // move on straight away; the answer saves behind it
+  rvDraw(rv.cards[rv.i] ? "#rv-q" : "#rv-done-h");
+  let msg, failed = false;
+  try {
+    const { card, before } = await api(`/api/cards/${c.id}/review`, { method: "POST", body: { correct } });
+    if (rv.d !== d) return;  // another set of cards is up now
+    const b = d.boxes; if (b && before?.due && b[before.box - 1] > 0) b[before.box - 1]--;  // new cards weren't in a box yet
+    if (b && card?.box) b[card.box - 1]++;
+    rv.answered++;
+    const when = card?.due ? ` on ${fmtDate(String(card.due).slice(0, 10))}` : " later";
+    msg = correct ? `Got it. It comes back${when}.` : `Missed it. It’s back in the first box and comes back${when}.`;
+    if (mine === rv.seq) rv.undo = { before, after: card, card: c, msg };  // only the latest answer can be undone
+  } catch (x) {
+    if (rv.d !== d) return;
+    rv.cards.splice(rv.i, 0, c); rv.shown = false; rvLeft(c, 1); failed = true;
+    rv.undo = { msg: msg = `That answer didn’t save: ${x.message}. The card is back, so answer it again.` };
+  } finally { rv.saving--; }
+  rvDraw(failed ? "#rv-q" : undefined); rvSay(msg); refreshDue();
+}
+async function rvUndo() {
+  const u = rv.undo, d = rv.d; if (!u?.before || rv.saving || rv.undoing) return;
+  rv.undoing = true; rv.undo = { msg: "Undoing…" }; rvDraw();
+  try {
+    await api(`/api/cards/${u.card.id}/undo`, { method: "POST", body: { before: u.before } });
+    if (rv.d !== d) return;
+    const b = d.boxes;  // put the box counts back the way they were
+    if (b && u.after?.box && b[u.after.box - 1] > 0) b[u.after.box - 1]--;
+    if (b && u.before.due) b[u.before.box - 1]++;
+    rv.cards.splice(rv.i, 0, u.card); rvLeft(u.card, 1); rv.shown = false; rv.answered--;
+    rv.undo = { msg: "Undone. Here’s that card again." };
+    rvDraw("#rv-q"); rvSay(rv.undo.msg); refreshDue();
+  } catch (x) {
+    if (rv.d === d) { rv.undo = u; rvDraw(); }
+    toast(`Couldn’t undo: ${x.message}`, 5000);
+  } finally { rv.undoing = false; }
+}
+function reviewKey(k, e) {
+  if (!location.hash.startsWith("#/review") || !$("#rv-stage")) return false;
+  if ((k === " " || k === "enter") && $("#rv-show") && !e.target.closest("button, a")) { rv.shown = true; rvDraw("#rv-a"); return true; }
+  if (k === "1" && $("#rv-miss")) { rvAnswer(false); return true; }
+  if (k === "2" && $("#rv-got")) { rvAnswer(true); return true; }
+  if (k === "u" && $("#rv-undo")) { rvUndo(); return true; }
+  return false;
+}
+// ---- quiz: one lecture's questions on one page. "Check my answers" marks without saving; you mark your own written
+// answers against the model answer; "Save this attempt" records one attempt.
+const qz = { id: null, l: null, qs: [], res: null, marks: {}, saved: null, last: null, next: null, draft: {}, gen: 0, busy: null };
+const qzAnswers = () => qz.qs.map(q => {
+  const v = q.kind === "mcq" ? $(`input[name="qz-${q.id}"]:checked`)?.value ?? "" : ($(`#qz-a-${q.id}`)?.value ?? "").trim();
+  return { id: q.id, answer: v };
+});
+const qzMarkable = q => q.kind === "short" && !!qz.res?.[q.id]?.your_answer;  // a blank written answer is simply missed
+const qzOpen = () => qz.qs.filter(q => qzMarkable(q) && qz.marks[q.id] == null).length;
+function qzDirty() {  // worth a warning: typed answers before a check, or your own marks before a save. A plain check is just a look.
+  const keep = !qz.saved && (qz.res ? qz.qs.some(q => qzMarkable(q) && qz.marks[q.id] != null) : qzAnswers().some(a => a.answer));
+  keep ? dirty.add("quiz") : dirty.delete("quiz");
+}
+function qzVerdict(q, r) {
+  if (!r) return "";
+  const mark = q.kind === "short" ? qz.marks[q.id] : r.correct, off = qz.saved || qz.busy ? " disabled" : "";
+  const head = !r.your_answer ? "Not answered" : mark === true ? "Right" : mark === false ? "Wrong" : "Mark this one yourself";
+  return `<div class="qz-res" data-verdict="${mark === true ? "right" : mark === false ? "wrong" : "open"}">
+    <p class="qz-verdict"><b>${head}.</b></p>
+    ${q.kind === "short" ? `<p><span class="qz-k">Model answer</span> ${mdInline(cardText(r.answer), {})}</p>
+      ${qzMarkable(q) ? `<div class="qz-mark" role="group" aria-label="Did you get question ${q.idx + 1} right?">
+        <button type="button" class="ghost" data-mark="1" data-q="${esc(q.id)}" aria-pressed="${qz.marks[q.id] === true}"${off}>I got it</button>
+        <button type="button" class="ghost" data-mark="0" data-q="${esc(q.id)}" aria-pressed="${qz.marks[q.id] === false}"${off}>I missed it</button></div>` : ""}` : ""}
+    ${r.explanation ? `<p class="qz-why">${mdInline(cardText(r.explanation), {})}</p>` : ""}
+    ${r.t != null ? `<p class="small"><a href="?t=${+r.t}#/lecture/${+qz.id}" target="_blank" rel="noopener">Hear it in the lecture at ${fmtTs(r.t)}<span class="vh"> (opens in a new tab)</span></a></p>` : ""}</div>`;
+}
+function qzQuestion(q) {
+  const r = qz.res?.[q.id], locked = qz.res || qz.busy ? " disabled" : "", n = q.idx + 1;  // checked or being checked
+  const text = `<span class="num" aria-hidden="true">${n}</span><span class="qz-text">${mdInline(cardText(q.question), {})}</span>`;
+  const body = q.kind === "mcq"
+    ? `<fieldset class="qz-q-body"><legend class="qz-head"><span class="vh">Question ${n}: </span>${text}</legend>
+        <div class="qz-choices">${(q.choices || []).map(c => {
+          const right = r && r.answer === c, mine = r && r.your_answer === c;
+          return `<label class="qz-choice${right ? " is-right" : ""}${mine && !right ? " is-wrong" : ""}">
+            <input type="radio" name="qz-${esc(q.id)}" value="${esc(c)}"${(r ? mine : qz.draft[q.id] === c) ? " checked" : ""}${locked}>
+            <span>${mdInline(cardText(c), {})}${right || mine ? `<span class="qz-tag">${right && mine ? "Your answer, and the right one" : right ? "Right answer" : "Your answer"}</span>` : ""}</span></label>`; }).join("")}</div></fieldset>`
+    : `<div class="qz-q-body"><label class="qz-head" for="qz-a-${esc(q.id)}"><span class="vh">Question ${n}: </span>${text}</label>
+        <textarea id="qz-a-${esc(q.id)}" name="qz-a-${esc(q.id)}" autocomplete="off" rows="3" placeholder="Write your answer…" spellcheck="true"${locked}>${esc(r ? r.your_answer : qz.draft[q.id] ?? "")}</textarea></div>`;
+  return `<li class="qz-q" id="qz-q-${n}">${body}${qzVerdict(q, r)}</li>`;
+}
+function qzScore() {
+  const list = Object.values(qz.res || {}), mcq = list.filter(r => r.kind === "mcq");
+  return { list, mcq, mcqRight: mcq.filter(r => r.correct).length, right: mcq.filter(r => r.correct).length + list.filter(r => r.kind === "short" && qz.marks[r.id] === true).length };
+}
+function qzSummary() {
+  if (qz.saved) return `<p><b>Saved: ${qz.saved.score} of ${qz.saved.total}.</b> It’s on the lecture’s record as your latest attempt.</p>`;
+  if (!qz.res) return "";
+  const { list, mcq, mcqRight, right } = qzScore(), open = qzOpen();
+  return `<p><b>${right} of ${list.length} right so far.</b> ${mcq.length ? `${mcqRight} of ${mcq.length} multiple choice. ` : ""}${
+    open ? `Mark your ${open === 1 ? "written answer" : `${open} written answers`} against the model ${open === 1 ? "answer" : "answers"}, then save.` : "Everything is marked."}</p>`;
+}
+function qzActions() {
+  const off = qz.busy ? " disabled" : "";
+  if (qz.saved) return `<button type="button" id="qz-again">Take it again</button>`;
+  if (!qz.res) return `<button type="submit" id="qz-check"${off}>${qz.busy === "check" ? "Checking…" : "Check my answers"}</button><span class="hint" id="qz-count"></span>`;
+  const open = qzOpen();
+  return `<button type="button" id="qz-save"${off}>${qz.busy === "save" ? "Saving…" : "Save this attempt"}</button>
+    <button type="button" class="ghost" id="qz-again"${off}>Change my answers</button>
+    ${open ? `<span class="hint">${open === 1 ? "1 written answer isn’t" : `${open} written answers aren’t`} marked yet, so ${open === 1 ? "it counts" : "they count"} as wrong if you save now.</span>` : ""}`;
+}
+function qzDraw(focus) {
+  const f = $("#qz-form"); if (!f) return;
+  $("#qz-list").innerHTML = qz.qs.map(qzQuestion).join("");
+  $("#qz-sum").innerHTML = qzSummary(); $("#qz-sum").hidden = !qz.res && !qz.saved;
+  $("#qz-actions").innerHTML = qzActions();
+  qzCount(); renderMath(f);
+  $("#qz-save") && ($("#qz-save").onclick = qzSave);
+  $("#qz-again") && ($("#qz-again").onclick = qzAgain);
+  if (focus) $(focus)?.focus();
+}
+function qzCount() {
+  const c = $("#qz-count"); if (!c) return;
+  const n = qzAnswers().filter(a => a.answer).length;
+  c.textContent = `${n} of ${qz.qs.length} answered`;
+}
+async function qzCheck(e) {
+  e.preventDefault();
+  if (qz.res || qz.busy) return;
+  const gen = qz.gen, answers = qzAnswers();
+  qz.draft = Object.fromEntries(answers.map(a => [a.id, a.answer]));
+  qz.busy = "check"; $("#qz-err").textContent = ""; qzDraw("#qz-check");
+  try {
+    const d = await api(`/api/lectures/${qz.id}/quiz`, { method: "POST", body: { check: true, answers } });
+    if (gen !== qz.gen) return;  // you've left, or come back to a fresh copy of this quiz
+    qz.busy = null; qz.res = Object.fromEntries((d.results || []).map(r => [r.id, r])); qz.marks = {};
+    for (const q of qz.qs) if (q.kind === "short" && qz.res[q.id] && !qz.res[q.id].your_answer) qz.marks[q.id] = false;
+    qzDirty(); qzDraw("#qz-sum");  // the summary takes focus, so it's read out once
+  } catch (x) {
+    if (gen !== qz.gen) return;
+    qz.busy = null; qzDraw("#qz-check");
+    $("#qz-err").textContent = `Your answers weren’t checked: ${x.message}. They’re still here; try again.`;
+  }
+}
+async function qzSave() {
+  if (!qz.res || qz.saved || qz.busy) return;
+  const gen = qz.gen;
+  const answers = qz.qs.map(q => ({ id: q.id, answer: qz.res[q.id]?.your_answer ?? "", ...(q.kind === "short" && qz.marks[q.id] != null && { correct: qz.marks[q.id] }) }));
+  qz.busy = "save"; $("#qz-err").textContent = ""; qzDraw("#qz-save");
+  try {
+    const d = await api(`/api/lectures/${qz.id}/quiz`, { method: "POST", body: { answers } });
+    if (gen !== qz.gen) return;
+    qz.busy = null; qz.saved = { score: +d.score || 0, total: +d.total || qz.qs.length }; qzDirty();
+    qzDraw("#qz-sum"); toast(`Attempt saved: ${qz.saved.score} of ${qz.saved.total}`);
+  } catch (x) {
+    if (gen !== qz.gen) return;
+    qz.busy = null; qzDraw("#qz-save");
+    $("#qz-err").textContent = `The attempt wasn’t saved: ${x.message}. Your marks are still here; try again.`;
+  }
+}
+function qzAgain() {  // after a save: a clean quiz. Before one: your answers come back to change; only the marks go.
+  if (qz.busy) return;
+  if (qz.saved) qz.draft = {};
+  Object.assign(qz, { res: null, marks: {}, saved: null }); qz.gen++;
+  qzDraw(); qzDirty(); $("#qz-q-1 input, #qz-q-1 textarea")?.focus(); scrollTo({ top: 0 });
+}
+
+async function refreshDue() {  // the rail's Review link: hidden on a server without flashcards, with the count due
+  const a = $('#nav a[data-route="review"]'), s = $('#nav a[data-route="search"]'); if (!a) return;
+  try { const d = await api("/api/review?limit=1"); const n = (+d.due || 0) + (+d.new || 0);
+    a.hidden = false; s.hidden = false; $("#due-count").textContent = n ? n : ""; a.setAttribute("aria-label", n ? `Review, ${n} due` : "Review"); }
+  catch (x) { if (x.status === 404) a.hidden = s.hidden = true; }
+}
+
+// ---- search: what was said, the notes and the slides, across every lecture. Results land as you type.
+const sr = { ctl: null, t: 0 };
+const SR_KIND = { transcript: "Said", notes: "Notes", slide: "Slide" };
+const SR_MISSING = `<div class="empty"><h3>Search isn’t on this server yet</h3><p>It comes with notes. Once the server is updated and restarted, search works here.</p></div>`;
+const snippet = html => String(html ?? "").replace(/<(?!\/?mark>)[^>]*>/g, "")  // the server escapes it and adds <mark>; nothing else gets through
+  .replace(/<\/mark>(\s+)<mark>/g, "$1")  // "dynamic scoping" is one match, not two
+  .replace(/\.\.\./g, "…");
+const snippetHtml = html => { const s = snippet(html); let depth = 0;  // an unclosed <mark> would bold every row after it
+  for (const m of s.matchAll(/<(\/?)mark>/g)) { depth += m[1] ? -1 : 1; if (depth < 0 || depth > 1) break; }
+  return depth === 0 ? s : s.replace(/<\/?mark>/g, ""); };
+function searchResults(rows, q) {
+  if (!q) return `<p class="muted sr-tip">Search what was said in class, the notes and the slides. Every word has to match, and the last one can be the start of a word.</p>`;
+  if (!rows.length) return `<div class="empty"><h3>Nothing matches “${esc(q)}”</h3><p>Every word has to appear. Try fewer words, or just the start of one.</p></div>`;
+  const groups = new Map();
+  for (const r of rows) { if (!groups.has(r.lecture_id)) groups.set(r.lecture_id, []); groups.get(r.lecture_id).push(r); }
+  for (const g of groups.values()) g.sort((a, b) => (a.t ?? -1) - (b.t ?? -1));  // lectures stay in rank order; inside one, hits read in time order
+  return `<p class="small muted">${rows.length} ${rows.length === 1 ? "match" : "matches"} in ${groups.size} ${groups.size === 1 ? "lecture" : "lectures"}</p>
+    <ol class="sr-list">${[...groups.values()].map(g => `<li class="sr-lec"><h3><a href="#/lecture/${+g[0].lecture_id}">${esc(g[0].title)}</a></h3>
+      <p class="sr-meta">${g[0].code ? `<span class="code" translate="no">${esc(g[0].code)}</span>` : ""}<span>${esc(fmtDate(g[0].date))}</span></p>
+      <ul>${g.map(r => `<li class="sr-hit"><a href="${r.t != null ? `?${r.kind === "notes" ? "tab=notes&" : ""}t=${+r.t}` : r.kind === "notes" ? "?tab=notes" : ""}#/lecture/${+r.lecture_id}">
+        <span class="num">${r.t != null ? fmtTs(r.t) : ""}</span><span class="sr-kind">${esc(SR_KIND[r.kind] || r.kind)}</span>
+        <span class="sr-snip">${snippetHtml(r.snippet_html)}</span></a></li>`).join("")}</ul></li>`).join("")}</ol>`;
+}
+const searchUrl = (q, course) => `/api/search?${new URLSearchParams({ q, limit: "100", ...(course ? { course_id: course } : {}) })}`;
+async function searchNow() {
+  const box = $("#sr-results"); if (!box) return;
+  const q = $("#sr-q").value.trim(), course = $("#sr-course").value, u = new URL(location.href);
+  q ? u.searchParams.set("q", q) : u.searchParams.delete("q");
+  course ? u.searchParams.set("course", course) : u.searchParams.delete("course");
+  history.replaceState(history.state, "", u);
+  sr.ctl?.abort();
+  const ctl = sr.ctl = new AbortController();
+  if (!q) { box.innerHTML = searchResults([], ""); box.removeAttribute("aria-busy"); return; }
+  box.setAttribute("aria-busy", "true");
+  try {
+    const rows = await api(searchUrl(q, course), { signal: ctl.signal });
+    if (ctl !== sr.ctl) return;
+    box.innerHTML = searchResults(rows, q);
+    $("#sl-live").textContent = rows.length ? `${rows.length} ${rows.length === 1 ? "match" : "matches"}` : "Nothing matches";
+  } catch (x) {
+    if (x.name === "AbortError" || ctl !== sr.ctl) return;
+    box.innerHTML = x.status === 404 ? SR_MISSING : `<p class="err">Search didn’t work: ${esc(x.message)}. Try again in a moment.</p>`;
+  } finally { if (ctl === sr.ctl) box.removeAttribute("aria-busy"); }
+}
+
+let tocRaf = 0;  // the contents mark the section being read
+function markToc() {
+  let cur = null;
+  for (const s of $$("#pane-notes .note-sec[id]")) { if (s.getBoundingClientRect().top < 160) cur = s; else break; }
+  $$("#pane-notes .notes-toc a").forEach(a => a.dataset.section === cur?.id.slice(9)
+    ? a.setAttribute("aria-current", "location") : a.removeAttribute("aria-current"));
+}
+addEventListener("scroll", () => { if (tocRaf || !$("#pane-notes .notes-toc") || $("#pane-notes").hidden) return;
+  tocRaf = requestAnimationFrame(() => { tocRaf = 0; markToc(); }); }, { passive: true });
+$("#view").addEventListener("click", e => {
+  const s = e.target.closest("#pane-notes [data-section], #pane-notes [data-seek]");
+  if (!s || e.defaultPrevented || (s.matches("a") && (e.ctrlKey || e.metaKey || e.shiftKey || e.button))) return;
+  e.preventDefault();
+  if (s.dataset.section) goSection(+s.dataset.section); else seek(+s.dataset.seek);
+});
 
 // ---- loading, error and leave-with-unsaved-changes states
 const sk = (w, h = 14) => `<span class="sk" style="width:${w};height:${h}px"></span>`;
@@ -663,6 +1808,12 @@ const listSkeleton = () => `<div class="page-head">${sk("200px", 38)}</div><div 
   `<div class="lec-sk">${sk(w + "%", 20)}${sk("48px")}<span class="meta">${sk("64px")}${sk(w * 3 + "px", 8)}</span></div>`).join("")}</div>`;
 const skeletons = {
   library: listSkeleton, course: listSkeleton,
+  quiz: () => `<div class="page-head">${sk("200px", 38)}</div>${[1, 2, 3].map(() =>
+    `<div style="display:grid;gap:10px;padding:24px 0;max-width:68ch">${sk("85%", 22)}${sk("60%")}${sk("60%")}${sk("60%")}</div>`).join("")}`,
+  search: () => `<div class="page-head">${sk("200px", 38)}</div>${sk("100%", 44)}${[1, 2, 3].map(() =>
+    `<div style="display:grid;gap:8px;padding:20px 0">${sk("50%", 20)}${sk("90%")}${sk("80%")}</div>`).join("")}`,
+  review: () => `<div class="page-head">${sk("200px", 38)}</div><div class="boxes">${[1, 2, 3, 4, 5].map(() => `<div>${sk("40px", 20)}</div>`).join("")}</div>
+    <div class="flash">${sk("40%")}<div style="margin-top:16px;display:grid;gap:8px">${sk("100%", 22)}${sk("70%", 22)}</div></div>`,
   courses: () => `<div class="page-head">${sk("320px", 38)}</div><div class="grid2">${[1, 2, 3, 4].map(() =>
     `<div style="display:grid;gap:12px">${sk("100%", 40)}${sk("100%", 200)}</div>`).join("")}</div>`,
   lecture: () => `<div class="page-head"><div style="display:grid;gap:12px;width:100%">${sk("60%", 38)}${sk("180px")}</div></div>
@@ -670,9 +1821,9 @@ const skeletons = {
     `<p class="seg-sk">${sk("36px", 12)}${sk(w + "%", 18)}</p>`).join("")}`,
 };
 function errorView(key, arg, err) {
-  const what = key === "lecture" ? `lecture ${arg}` : key === "course" ? "this course" : "this page";
+  const what = key === "lecture" || key === "quiz" ? `lecture ${arg}` : key === "course" ? "this course" : "this page";
   const [title, body] = err.status === 404
-    ? [`There’s no ${what}`, "It may have been deleted, or the link is out of date."]
+    ? [what !== "this page" ? `There’s no ${what}` : "This page doesn’t exist", "It may have been deleted, or the link is out of date."]
     : err.status ? [`${what.charAt(0).toUpperCase() + what.slice(1)} didn’t load`, `The server said: ${esc(err.message)}. Try again; if it keeps failing, check server.log.`]
     : ["The server isn’t answering", "LectureLab’s server isn’t running or was restarted. Start it with <code>lecturelab serve</code>, then try again."];
   const actions = err.status === 404 ? `<a class="btn" href="#/">Back to Library</a>`  // retrying a missing id can't help
@@ -702,10 +1853,13 @@ async function render() {
   const seq = ++renderSeq, view = $("#view");
   let [, route = "", arg] = location.hash.slice(1).split("/");
   if (arg !== undefined && !/^\d+$/.test(arg)) { route = ""; arg = undefined; }  // ids only: never echo the hash into HTML
-  if (arg === undefined && (route === "lecture" || route === "course")) route = "";  // these need an id
+  if (arg === undefined && (route === "lecture" || route === "course" || route === "quiz")) route = "";  // these need an id
   const key = Object.hasOwn(views, route) ? route : "library", where = `${key}/${arg ?? ""}`;
   $$("aside nav a").forEach(a => a.dataset.route === (arg ? `${key}-${arg}` : key)
     ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+  const navs = $(".navs"), cur = $('aside nav a[aria-current="page"]');  // phones: the rail is one scrolling row, so bring the current page into it
+  if (navs && cur && navs.scrollWidth > navs.clientWidth) { const a = cur.getBoundingClientRect(), n = navs.getBoundingClientRect();
+    if (a.left < n.left || a.right > n.right) navs.scrollLeft += a.left - n.left - 16; }
   // Skeletons only on a real navigation that's slow; background re-renders of the same view swap in place.
   const skel = where !== shown && setTimeout(() => {
     if (seq === renderSeq) { view.innerHTML = skeletons[key](); view.setAttribute("aria-busy", "true"); } }, 120);
@@ -761,17 +1915,17 @@ $("#drop-label").dataset.orig = $("#drop-label").innerHTML;
 $("#add-btn").onclick = () => openAdd();
 $("#add-cancel").onclick = () => $("#add-dlg").close();
 $("#add-dlg").addEventListener("close", () => setAddParam(null));
-$$(".tabs button").forEach(b => b.onclick = () => {
+$$("#add-dlg .tabs button").forEach(b => b.onclick = () => {
   addTab = b.dataset.tab; clearErrors(); setAddParam(addTab);
-  $$(".tabs button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", x === b); x.tabIndex = x === b ? 0 : -1; });
+  $$("#add-dlg .tabs button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", x === b); x.tabIndex = x === b ? 0 : -1; });
   $$("[data-pane]").forEach(p => p.hidden = p.dataset.pane !== addTab);
   $("#add-meta").hidden = addTab === "canvas";
   $("#add-submit").textContent = addTab === "canvas" ? "Pull selected" : "Add recording";
   if (addTab === "canvas") { canvasCourseRow(); loadCanvasItems(); loadCanvasStatus(); }
 });
 
-$(".tabs").onkeydown = e => {  // arrow keys move between tabs, as a tablist should
-  const tabs = $$(".tabs button"), i = tabs.indexOf(document.activeElement);
+$("#add-dlg .tabs").onkeydown = e => {  // arrow keys move between tabs, as a tablist should
+  const tabs = $$("#add-dlg .tabs button"), i = tabs.indexOf(document.activeElement);
   const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
   if (i < 0 || j === undefined) return;
   e.preventDefault(); const t = tabs[(j + tabs.length) % tabs.length]; t.focus(); t.click();
@@ -964,23 +2118,39 @@ async function heartbeat() {
 
 $("#skip").onclick = () => $("#view").focus();
 let here = location.hash;
-window.addEventListener("hashchange", () => {
+const OWN_PARAMS = { lecture: ["tab", "section", "t"], review: ["course", "lecture"], search: ["q", "course"] };
+history.replaceState({ ...history.state, seen: 1 }, "");
+let handled = location.href;
+function onNav() {  // Chrome sends only popstate when Back also changes the query, and both events for a plain link: handle each URL once
+  if (location.href === handled) return;
   if (dirty.size && !confirm("You have unsaved changes on this page. Leave without saving them?")) {
-    history.replaceState(null, "", here || "#/"); return; }
-  dirty.clear(); here = location.hash; render();
-});
+    history.replaceState({ seen: 1 }, "", here || "#/"); handled = location.href; return; }
+  dirty.clear(); here = location.hash;
+  if ($("#slide-dlg").open) $("#slide-dlg").close();  // the viewer belongs to the page being left
+  // A link carries the old page's ?tab, ?q and so on along; drop them. Back and Forward return to an entry this page already
+  // marked as seen, and keep the params that page owns, so a search or a review scope survives a trip to a lecture.
+  const route = location.hash.slice(2).split("/")[0], back = history.state?.seen, u = new URL(location.href);
+  const stale = Object.values(OWN_PARAMS).flat().filter(k => u.searchParams.has(k) && !(back && OWN_PARAMS[route]?.includes(k)));
+  stale.forEach(k => u.searchParams.delete(k));
+  history.replaceState({ ...history.state, seen: 1 }, "", u); handled = location.href;
+  render();
+}
+window.addEventListener("hashchange", onNav);
+window.addEventListener("popstate", onNav);
 window.addEventListener("beforeunload", e => { if (dirty.size) e.preventDefault(); });
 // Shortcuts for the most frequent actions. Ignored while typing, with a modifier, or with a dialog open.
 document.addEventListener("keydown", e => {
   if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented || $("dialog[open]")) return;
   if (e.target.closest("input, textarea, select, [contenteditable], video, audio")) return;  // native players handle their own keys
   const p = $("#player"), k = e.key.toLowerCase();
-  if (k === "a") { e.preventDefault(); openAdd(); }
+  if (reviewKey(k, e)) e.preventDefault();
+  else if (k === "/") { e.preventDefault(); $("#sr-q") ? $("#sr-q").focus() : (location.hash = "#/search"); }
+  else if (k === "a") { e.preventDefault(); openAdd(); }
   else if (p && k === "k") { e.preventDefault(); p.paused ? p.play().catch(() => {}) : p.pause(); }
   else if (p && (k === "j" || k === "l")) { e.preventDefault(); p.currentTime = Math.max(p.currentTime + (k === "j" ? -10 : 10), 0); }
 });
 window.addEventListener("unhandledrejection", e => { toast("Error: " + (e.reason?.message || e.reason), 5000); });
-(async () => { await loadCourses().catch(() => {}); await render(); heartbeat(); setInterval(heartbeat, 15000); pollJobs();
+(async () => { await loadCourses().catch(() => {}); await render(); heartbeat(); setInterval(heartbeat, 15000); refreshDue(); setInterval(refreshDue, 60000); pollJobs();
   const tab = new URL(location.href).searchParams.get("add");
   if (["file", "link", "canvas"].includes(tab)) openAdd(tab); else if (tab !== null) setAddParam(null); })();
 </script>
