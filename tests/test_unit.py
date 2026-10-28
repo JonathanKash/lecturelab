@@ -1,7 +1,10 @@
 import importlib
+import json
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime
 
 import pytest
 
@@ -12,6 +15,9 @@ def ll(tmp_path, monkeypatch):
     monkeypatch.setenv("LECTURELAB_DATA", str(tmp_path / "data"))
     monkeypatch.setenv("LECTURELAB_LOG", str(tmp_path / "test.log"))
     monkeypatch.setenv("LECTURELAB_ORPHAN_SWEEP_SEC", "0")  # no minute-by-minute thread outliving the test
+    monkeypatch.setenv("LECTURELAB_NOTES_DIR", str(tmp_path / "AI Notes" / "Lectures"))  # never the real one
+    monkeypatch.delenv("LECTURELAB_CLAUDE", raising=False)  # conftest's off switch: these tests fake claude
+    monkeypatch.delenv("LECTURELAB_AUTO_NOTES", raising=False)
     import lecturelab
     return importlib.reload(lecturelab)
 
@@ -956,9 +962,12 @@ def test_api_slide_upload_errors_pick_and_images(ll, monkeypatch, tmp_path):
     assert r.status_code == 200, r.text
     body = r.json()
     assert (body["deck"]["source"], body["deck"]["how"], body["deck"]["pages"]) == ("upload", "manual", 7)
-    assert body["state"] == "waiting"  # queued for alignment
+    assert (body["state"], body["reason"]) == ("waiting", "reading the slides")  # the job reads it
     assert (ll.DATA / "Slides" / "COP4020" / "_CON.pdf").is_file()  # no device name, no path parts
     did = body["deck"]["id"]
+    assert c.get(f"/media/slides/{did}/1-320.png").status_code == 404
+    out = ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    assert out["pages"] == 7 and c.get(url).json()["state"] == "aligned"
     img = c.get(f"/media/slides/{did}/1-320.png")
     assert img.status_code == 200 and img.headers["cache-control"] == "no-cache"
     assert c.get(f"/media/slides/{did}/..%5C..%5Clecturelab.db").status_code == 404
@@ -972,6 +981,81 @@ def test_api_slide_upload_errors_pick_and_images(ll, monkeypatch, tmp_path):
     r = c.put(url, json={"deck_id": None})
     assert r.json()["state"] == "none"
     assert c.put(url, json={"deck_id": 999}).status_code == 400
+
+
+def test_slide_upload_turns_bad_files_away_at_once_and_reads_in_the_job(ll, monkeypatch, tmp_path):
+    import io
+    import zipfile
+    import pymupdf as fitz
+    from fastapi.testclient import TestClient
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "Parsing day", cid, segs=_said([3, 3, 4]))
+    url = f"/api/lectures/{lid}/slides"
+    locked = tmp_path / "locked.pdf"
+    doc = fitz.open(_pdf(tmp_path / "open.pdf", SLIDE_TEXT[:2]))
+    doc.save(locked, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="u", owner_pw="o")
+    doc.close()
+    r = c.post(url, files={"file": ("locked.pdf", locked.read_bytes())})
+    assert r.status_code == 422 and "password" in r.json()["detail"]
+    for name, data in (("deck.pptx", b"PK not really a zip"), ("old.ppt", b"not an OLE file")):
+        assert c.post(url, files={"file": (name, data)}).status_code == 422
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("ppt/presentation.xml", "<p/>")
+    assert "no pages" in c.post(url, files={"file": ("empty.pptx", buf.getvalue())}).json()["detail"]
+    monkeypatch.setattr(ll, "MAX_DECK_PAGES", 1)
+    assert "textbook" in c.post(url, files={"file": ("book.pdf", locked.with_name("open.pdf").read_bytes())}).json()["detail"]
+    monkeypatch.setattr(ll, "MAX_DECK_PAGES", 300)
+    assert not list((ll.DATA / "Slides").rglob("*.*"))  # nothing turned away was kept
+
+    # one file attached to two lectures: one deck, one stored copy
+    good = _pdf(tmp_path / "Parsing.pdf", SLIDE_TEXT).read_bytes()
+    other = _lec(ll, "Parsing day, section 2", cid, segs=_said([3, 3, 4]))
+    real = ll.extract_deck
+
+    def unreadable(did, say=None):
+        raise ll.DeckError("This PDF couldn't be opened; export it again and attach that.")
+    monkeypatch.setattr(ll, "extract_deck", unreadable)
+    did = c.post(url, files={"file": ("Parsing.pdf", good)}).json()["deck"]["id"]
+    assert c.post(f"/api/lectures/{other}/slides", files={"file": ("Parsing.pdf", good)}).json()["deck"]["id"] == did
+    stored = lambda: list((ll.DATA / "Slides").rglob("*.pdf"))  # noqa: E731
+    assert len(stored()) == 1
+
+    # it can't be read: both lectures show why, and attaching it again reads it again for both
+    with pytest.raises(ll.DeckError, match="export it again"):
+        ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    with pytest.raises(ll.DeckError):
+        ll.job_slides({"id": 0, "payload": {"lecture_id": other}})
+    assert [c.get(f"/api/lectures/{x}/slides").json()["state"] for x in (lid, other)] == ["error", "error"]
+    assert ll.get_deck(did)["status"] == "error"
+    monkeypatch.setattr(ll, "extract_deck", real)
+    body = c.post(url, files={"file": ("Parsing.pdf", good)}).json()
+    assert body["deck"]["id"] == did and (body["state"], body["reason"]) == ("waiting", "reading the slides")
+    assert len(stored()) == 1 and c.get(f"/api/lectures/{other}/slides").json()["state"] == "waiting"
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid}})
+    ll.job_slides({"id": 0, "payload": {"lecture_id": other}})
+    assert [c.get(f"/api/lectures/{x}/slides").json()["state"] for x in (lid, other)] == ["aligned", "aligned"]
+
+    # a passing failure (OCR timing out) fails the job but not the deck: looking again reads it
+    lid3 = _lec(ll, "Parsing day, again", cid, segs=_said([3, 3, 4]))
+    good2 = _pdf(tmp_path / "Parsing2.pdf", SLIDE_TEXT[:5]).read_bytes()
+    monkeypatch.setattr(ll, "extract_deck", lambda did, say=None: 1 / 0)
+    did2 = c.post(f"/api/lectures/{lid3}/slides", files={"file": ("Parsing2.pdf", good2)}).json()["deck"]["id"]
+    with pytest.raises(ZeroDivisionError):
+        ll.job_slides({"id": 0, "payload": {"lecture_id": lid3}})
+    assert c.get(f"/api/lectures/{lid3}/slides").json()["state"] == "error" and ll.get_deck(did2)["status"] == "new"
+    monkeypatch.setattr(ll, "extract_deck", real)
+    assert c.post(f"/api/lectures/{lid3}/slides/align").status_code == 200
+    ll.job_slides({"id": 0, "payload": {"lecture_id": lid3}})
+    assert c.get(f"/api/lectures/{lid3}/slides").json()["state"] == "aligned"
+
+
+def test_test_servers_never_call_claude(ll, monkeypatch):
+    monkeypatch.setenv("LECTURELAB_CLAUDE", "off")
+    monkeypatch.setattr(ll, "claude_exe", lambda: pytest.fail("reached claude"))
+    with pytest.raises(ll.ClaudeUnavailable, match="turned off"):
+        ll.claude_call("p", system=ll.OUTLINE_SYSTEM, kind="outline")
 
 
 def test_canvas_scan_lists_decks_separately_and_queues_downloads(ll, monkeypatch):
@@ -1349,3 +1433,647 @@ def test_stay_awake_asks_windows_for_system_and_screen_then_lets_go(ll, monkeypa
     assert sent == [0x80000003, 0x80000000]
     monkeypatch.setattr(ctypes.windll.kernel32, "SetThreadExecutionState", lambda f: 1 / 0)
     assert ll.stay_awake(True) is False  # a failure is logged, never raised
+
+
+# ---------------------------------------------------------------- Stage 4: notes
+
+def _fake_claude(ll, monkeypatch, answers, calls=None, env_seen=None):
+    """Stand in for `claude -p`: answers[kind] is what each pass returns (a dict for JSON passes,
+    a string or a function of the prompt for sections)."""
+    kinds = {ll.OUTLINE_SYSTEM: "outline", ll.SECTION_SYSTEM: "section", ll.LOGISTICS_SYSTEM: "logistics",
+             ll.STUDY_SYSTEM: "study", ll.CHECK_SYSTEM: "check"}
+
+    def run(cmd, prompt, timeout):
+        kind = kinds[cmd[cmd.index("--system-prompt") + 1]]
+        if calls is not None:
+            calls.append((kind, cmd, prompt))
+        if env_seen is not None:
+            env_seen.append(ll.claude_env())
+        a = answers[kind]
+        a = a(prompt) if callable(a) else a
+        if isinstance(a, Exception):
+            raise a
+        if isinstance(a, tuple):  # (is_error, message)
+            out = {"type": "result", "is_error": True, "result": a[1]}
+        elif isinstance(a, str):
+            out = {"type": "result", "is_error": False, "result": a, "usage": {"output_tokens": 5}}
+        else:
+            out = {"type": "result", "is_error": False, "result": json.dumps(a), "structured_output": a}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(out), "")
+    monkeypatch.setattr(ll, "_claude_run", run)
+    monkeypatch.setattr(ll, "claude_exe", lambda: "claude")
+
+
+def _notes_lecture(ll):
+    cid = ll.find_course("COP4020")["id"]
+    segs = [(0, 20, "okay can everyone hear me in the back"), (20, 40, "so the midterm is next thursday"),
+            (40, 70, "today back us now are form which is how we write grammars"),
+            (70, 100, "a nonterminal goes on the left of the arrow"),
+            (100, 130, "left recursion means the nonterminal calls itself first"),
+            (130, 160, "and an LL parser loops forever on that")]
+    return _lec(ll, "Grammars", cid, segs=segs)
+
+
+OUTLINE = {"sections": [
+    {"title": "Before class", "start": 0, "end": 20, "kind": "off-topic", "slides": [], "gist": "mic check"},
+    {"title": "Midterm", "start": 20, "end": 40, "kind": "logistics", "slides": [], "gist": "exam date"},
+    {"title": "BNF", "start": 40, "end": 100, "kind": "content", "slides": [], "gist": "grammar notation"},
+    {"title": "Left recursion", "start": 100, "end": 160, "kind": "content", "slides": [], "gist": "LL loops"}]}
+STUDY = {"summary": "Grammars and left recursion.\n\n- BNF writes grammars",
+         "open_questions": ["What fixes left recursion?", " "],
+         "cards": [{"kind": "cloze", "front": "{{c1::BNF}} is how we write grammars", "back": "notation", "t": 45},
+                   {"kind": "qa", "front": "Why do LL parsers loop on left recursion?", "back": "they call it first",
+                    "t": 120},
+                   {"kind": "qa", "front": "Made-up card", "back": "nope", "t": 50}],
+         "quiz": [{"kind": "mcq", "question": "Which side of the arrow?", "choices": ["left", "right"],
+                   "answer": "left", "explanation": "the lecture said so", "t": 75},
+                  {"kind": "mcq", "question": "Broken", "choices": ["a", "b"], "answer": "c", "explanation": "",
+                   "t": 75},
+                  {"kind": "short", "question": "What is left recursion?", "choices": [],
+                   "answer": "A nonterminal deriving itself first.", "explanation": "", "t": 100}]}
+CHECK = {"edits": [{"number": 3, "find": "**BNF**: how we write grammars",
+                    "replace": "Left recursion: the nonterminal calls itself first.\n\n> [!check] the loop claim"},
+                   {"number": 2, "find": "text that isn't in the notes", "replace": ""}],
+         "summary": None, "drop_cards": [3], "drop_quiz": [], "issues": [
+             {"where": "card 3", "verdict": "removed", "claim": "Made-up card", "reason": "not in the lecture"},
+             {"where": "section 3", "verdict": "flagged", "claim": "loops forever", "reason": "audio unclear"}]}
+
+
+def _section(prompt):
+    if "► 2. Midterm" in prompt or "Midterm (" in prompt.split("►")[1][:40]:
+        return "- [▶ 0:20](#t=20) Midterm next Thursday.\n\n> [!exam] midterm"
+    # a heading it shouldn't add, a good link, and one far outside the section
+    return "## BNF\n\n[▶ 0:40](#t=40) **BNF**: how we write grammars (see [▶ 9:59](#t=599))."
+
+
+def test_claude_is_called_on_the_plan_without_an_api_key_or_your_setup(ll, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    calls, envs = [], []
+    _fake_claude(ll, monkeypatch, {"section": "hi"}, calls, envs)
+    assert ll.claude_call("long prompt " * 5000, system=ll.SECTION_SYSTEM, lecture_id=1, kind="section") == "hi"
+    kind, cmd, prompt = calls[0]
+    assert "ANTHROPIC_API_KEY" not in envs[0] and "ANTHROPIC_AUTH_TOKEN" not in envs[0]
+    assert "--bare" not in cmd  # it forces API-key auth
+    assert {"-p", "--setting-sources=", "--strict-mcp-config", "--tools=", "--no-session-persistence"} <= set(cmd)
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert prompt.startswith("long prompt") and "long prompt" not in " ".join(cmd)  # on stdin, not the command line
+
+
+def test_the_same_claude_call_twice_is_answered_from_the_cache(ll, monkeypatch):
+    calls = []
+    _fake_claude(ll, monkeypatch, {"outline": OUTLINE}, calls)
+    a = ll.claude_call("p", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
+    b = ll.claude_call("p", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
+    assert a == b == OUTLINE and len(calls) == 1
+    ll.claude_call("other", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
+    assert len(calls) == 2
+    with ll.db() as con:
+        assert [r[0] for r in con.execute("SELECT cached FROM claude_calls ORDER BY id")] == [0, 1, 0]
+
+
+def test_the_usage_limit_parks_claude_calls_until_it_resets(ll, monkeypatch):
+    calls = []
+    reset = int(time.time()) + 7200
+    _fake_claude(ll, monkeypatch, {"section": (True, f"Claude AI usage limit reached|{reset}")}, calls)
+    with pytest.raises(ll.QuotaExceeded) as e:
+        ll.claude_call("p", system=ll.SECTION_SYSTEM)
+    assert e.value.reset_at == reset
+    with pytest.raises(ll.QuotaExceeded):
+        ll.claude_call("q", system=ll.SECTION_SYSTEM)
+    assert len(calls) == 1  # parked: no second call while the limit lasts
+    now = datetime(2026, 10, 28, 13, 0).timestamp()
+    assert datetime.fromtimestamp(ll.quota_reset_at("5-hour limit reached · resets 3pm", now)).hour == 15
+    assert ll.quota_reset_at("You've hit your limit · resets 9am", now) > now + 19 * 3600  # tomorrow
+    assert ll.quota_reset_at("limit reached", now) == now + 3600
+
+
+def test_a_claude_failure_says_what_happened(ll, monkeypatch):
+    _fake_claude(ll, monkeypatch, {"section": (True, "Invalid model"),
+                                   "study": subprocess.TimeoutExpired("claude", 5)})
+    with pytest.raises(ll.ClaudeError, match="Invalid model"):
+        ll.claude_call("p", system=ll.SECTION_SYSTEM)
+    with pytest.raises(ll.ClaudeError, match="didn't answer"):
+        ll.claude_call("p", system=ll.STUDY_SYSTEM, schema=ll.STUDY_SCHEMA)
+
+
+def test_the_outline_is_cleaned_into_contiguous_sections():
+    import lecturelab as ll
+    out = ll.clean_outline([{"title": "B", "start": 300, "end": 1, "kind": "content", "slides": [3, 3, 0]},
+                            {"title": "A", "start": 12, "end": 9, "kind": "content", "slides": [1]},
+                            {"title": "sliver", "start": 305, "end": 306, "kind": "content", "slides": [4]},
+                            {"title": "tail", "start": 595, "end": 600, "kind": "content", "slides": []}], 600)
+    assert [(s["title"], s["start"], s["end"], s["slides"]) for s in out] == \
+        [("A", 0.0, 300.0, [1]), ("B", 300.0, 600, [3, 4])]
+
+
+def test_notes_are_written_checked_and_stored_with_cards_and_quiz(ll, monkeypatch):
+    lid = _notes_lecture(ll)
+    calls = []
+    _fake_claude(ll, monkeypatch, {"outline": OUTLINE, "section": _section, "logistics": _section,
+                                   "study": STUDY, "check": CHECK}, calls)
+    res = ll.job_notes({"id": 0, "payload": {"lecture_id": lid}})
+    assert [c[0] for c in calls] == ["outline", "logistics", "section", "section", "study", "check"]
+    assert calls[-1][1][calls[-1][1].index("--model") + 1] == "opus"  # only the check pass
+    assert res == {"sections": 3, "cards": 2, "quiz": 2, "removed": 1, "flagged": 2, "mode": "claude"}
+    n = ll.lecture_notes(lid)
+    assert n["state"] == "done" and not n["stale"] and n["open_questions"] == ["What fixes left recursion?"]
+    assert [s["title"] for s in n["sections"]] == ["Midterm", "BNF", "Left recursion"]  # chatter left out
+    bnf = n["sections"][1]["markdown"]
+    assert not bnf.startswith("#") and "(#t=40)" in bnf and "(#t=599)" not in bnf  # a link outside it dropped
+    assert "[!check]" in n["sections"][2]["markdown"]  # the check pass edited it
+    assert "(#t=40)" in n["sections"][2]["markdown"]  # the rest of the section untouched
+    assert any("wasn't applied" in i["reason"] for i in n["issues"])  # an edit that matched nothing
+    with ll.db() as con:
+        assert con.execute("SELECT status FROM lectures WHERE id=?", (lid,)).fetchone()[0] == "exported"
+        assert [r[0] for r in con.execute("SELECT front FROM cards WHERE lecture_id=? ORDER BY id", (lid,))] == \
+            ["{{c1::BNF}} is how we write grammars", "Why do LL parsers loop on left recursion?"]
+        assert [r[0] for r in con.execute("SELECT question FROM quiz WHERE lecture_id=? ORDER BY idx", (lid,))] == \
+            ["Which side of the arrow?", "What is left recursion?"]  # the mcq with no right choice is gone
+        con.execute("UPDATE cards SET box=3, due='2026-11-01', reviews=4 WHERE kind='cloze'")
+    # Regenerating changes nothing it doesn't have to: no new claude calls, your card progress kept
+    calls.clear()
+    ll.job_notes({"id": 0, "payload": {"lecture_id": lid}})
+    assert calls == []
+    with ll.db() as con:
+        assert tuple(con.execute("SELECT box, due, reviews FROM cards WHERE kind='cloze'").fetchone()) == \
+            (3, "2026-11-01", 4)
+        assert con.execute("SELECT COUNT(*) FROM claude_calls WHERE cached=0").fetchone()[0] == 6
+    with ll.db() as con:  # a new transcript makes the notes stale
+        con.execute("UPDATE lectures SET transcript_source='colab-large-v3 (T4)' WHERE id=?", (lid,))
+    assert ll.lecture_notes(lid)["stale"]
+
+
+def test_notes_wait_out_the_usage_limit_and_resume_from_the_cache(ll, monkeypatch):
+    lid = _notes_lecture(ll)
+    calls = []
+    reset = int(time.time()) + 3600
+    answers = {"outline": OUTLINE, "section": _section, "logistics": _section,
+               "study": (True, f"Claude AI usage limit reached|{reset}"), "check": CHECK}
+    _fake_claude(ll, monkeypatch, answers, calls)
+    jid = ll.enqueue_notes(lid)
+    ll.run_job(ll.claim_job(["notes"]))
+    job = ll.get_job(jid)
+    assert job["status"] == "queued" and job["retry_at"] and "usage limit" in job["progress"]
+    assert ll.lecture_notes(lid)["state"] == "waiting_quota"
+    # the limit resets: only what didn't run before is asked again
+    ll.meta_set("claude_quota_until", 0)
+    answers["study"] = STUDY
+    calls.clear()
+    with ll.db() as con:
+        con.execute("UPDATE jobs SET retry_at=NULL WHERE id=?", (jid,))
+    ll.run_job(ll.claim_job(["notes"]))
+    assert [c[0] for c in calls] == ["study", "check"]
+    assert ll.get_job(jid)["status"] == "done" and ll.lecture_notes(lid)["state"] == "done"
+
+
+def test_a_failed_notes_run_says_why_and_keeps_the_transcript(ll, monkeypatch):
+    lid = _notes_lecture(ll)
+    _fake_claude(ll, monkeypatch, {"outline": (True, "Invalid model name")})
+    with pytest.raises(ll.ClaudeError):
+        ll.job_notes({"id": 0, "payload": {"lecture_id": lid}})
+    n = ll.lecture_notes(lid)
+    assert n["state"] == "error" and "Invalid model name" in n["error"]
+    assert ll.get_lecture(lid)["status"] == "transcribed"
+
+
+def test_notes_follow_the_slides_once_they_are_settled(ll, monkeypatch):
+    queued = []
+    monkeypatch.setattr(ll, "enqueue_notes", lambda lid, mode="claude": queued.append(lid))
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "Audio only", cid, segs=_said([1, 2]))  # no video, no deck, course not on Canvas
+    ll.job_slides_then_notes({"id": 0, "payload": {"lecture_id": lid}})
+    assert queued == [lid]
+    with ll.db() as con:  # on Canvas and not scanned yet: its deck may still turn up
+        con.execute("UPDATE courses SET canvas_id=11 WHERE id=?", (cid,))
+    other = _lec(ll, "Audio only 2", cid, segs=_said([1, 2]))
+    ll.job_slides_then_notes({"id": 0, "payload": {"lecture_id": other}})
+    assert queued == [lid]
+    ll.slides_scanned(cid)
+    ll.job_slides_then_notes({"id": 0, "payload": {"lecture_id": other}})
+    assert queued == [lid, other]
+
+
+def test_notes_api_queues_and_reports(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(ll, "wake_workers", lambda: None)
+    lid = _notes_lecture(ll)
+    empty = _lecture(ll, "queued_transcribe")
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")  # no lifespan: no workers
+    assert c.get(f"/api/lectures/{lid}/notes").json()["state"] == "none"
+    assert c.post(f"/api/lectures/{lid}/notes", json={}).json()["state"] == "queued"
+    assert c.post(f"/api/lectures/{empty}/notes", json={}).status_code == 409
+    assert c.post(f"/api/lectures/{lid}/notes", json={"mode": "gpt"}).status_code == 422
+    assert c.get("/api/lectures/99999/notes").status_code == 404
+    with ll.db() as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs WHERE kind='notes'").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------- Stage 4: study
+
+def _notes_done(ll, monkeypatch):
+    lid = _notes_lecture(ll)
+    _fake_claude(ll, monkeypatch, {"outline": OUTLINE, "section": _section, "logistics": _section,
+                                   "study": STUDY, "check": CHECK})
+    ll.job_notes({"id": 0, "payload": {"lecture_id": lid}})
+    return lid
+
+
+def test_leitner_moves_cards_up_on_right_and_back_to_box_1_on_wrong(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    due = ll.due_cards(lecture_id=lid)
+    assert (due["total"], due["new"], due["due"], due["boxes"]) == (2, 2, 0, [0, 0, 0, 0, 0])  # new: no box yet
+    a, b = (c["id"] for c in due["cards"])
+    r = ll.review_card(a, True)
+    assert (r["card"]["box"], r["card"]["due"]) == (2, ll._today(2)) and r["before"]["box"] == 1
+    assert ll.due_cards(lecture_id=lid)["boxes"] == [0, 1, 0, 0, 0]
+    r = ll.review_card(a, True)
+    assert (r["card"]["box"], r["card"]["due"]) == (3, ll._today(4))
+    for _ in range(5):
+        r = ll.review_card(a, True)
+    assert (r["card"]["box"], r["card"]["due"], r["card"]["reviews"]) == (5, ll._today(16), 7)
+    r = ll.review_card(a, False)
+    assert (r["card"]["box"], r["card"]["due"], r["card"]["lapses"]) == (1, ll._today(1), 1)
+    back = ll.undo_review(a, r["before"])  # the UI's undo
+    assert (back["box"], back["lapses"], back["reviews"]) == (5, 0, 7)
+    assert [c["id"] for c in ll.due_cards(lecture_id=lid)["cards"]] == [b]  # a isn't due for 16 days
+
+
+def test_quiz_marks_multiple_choice_and_takes_your_word_on_short_answers(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    qs = ll.lecture_quiz(lid)["questions"]
+    assert [q["kind"] for q in qs] == ["mcq", "short"] and "answer" not in qs[0]
+    out = ll.grade_quiz(lid, [{"id": qs[0]["id"], "answer": "  LEFT "}, {"id": qs[1]["id"], "answer": "x",
+                                                                         "correct": True}])
+    assert (out["score"], out["total"]) == (2, 2) and out["results"][0]["explanation"]
+    out = ll.grade_quiz(lid, [{"id": qs[0]["id"], "answer": "right"}])  # the short one unanswered
+    assert (out["score"], out["total"]) == (0, 2)
+    assert ll.lecture_quiz(lid)["last_attempt"]["score"] == 0
+
+
+def test_quiz_check_shows_answers_without_saving_then_one_attempt_is_saved(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    lid = _notes_done(ll, monkeypatch)
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    url = f"/api/lectures/{lid}/quiz"
+    mcq, short = c.get(url).json()["questions"]
+    out = c.post(url, json={"check": True, "answers": [{"id": mcq["id"], "answer": "left"},
+                                                       {"id": short["id"], "answer": "my words"}]}).json()
+    assert [r["correct"] for r in out["results"]] == [True, None] and out["results"][1]["answer"]
+    assert (out["score"], out["unmarked"], out["saved"]) == (1, 1, False)
+    assert c.get(url).json()["last_attempt"] is None  # checking saved nothing
+    out = c.post(url, json={"answers": [{"id": mcq["id"], "answer": "left"},
+                                        {"id": short["id"], "answer": "my words", "correct": True}]}).json()
+    assert (out["score"], out["total"], out["saved"]) == (2, 2, True)
+    last = c.get(url).json()["last_attempt"]
+    assert (last["score"], last["total"]) == (2, 2) and last["at"]
+    with ll.db() as con:
+        assert con.execute("SELECT COUNT(*) FROM quiz_attempts WHERE lecture_id=?", (lid,)).fetchone()[0] == 1
+
+
+def test_a_cloze_answer_with_double_colons_becomes_a_question(ll):
+    c = ll.fix_card({"kind": "cloze", "front": "A growable array in C++ is {{c1::std::vector}}.",
+                     "back": "From <vector>.", "t": 5})
+    assert c["kind"] == "qa" and c["front"] == "Fill in the blank: A growable array in C++ is ____."
+    assert c["back"] == "`std::vector`\n\nFrom <vector>." and c["t"] == 5
+    plain = {"kind": "cloze", "front": "A {{c1::grammar}} has rules; {{c2::BNF}} writes them.", "back": "", "t": 0}
+    assert ll.fix_card(plain) is plain
+    multi = ll.fix_card({"kind": "cloze", "front": "Sort with {{c1::sort}} from {{c2::std::\nranges}}.", "back": "", "t": 0})
+    assert multi["front"] == "Fill in the blank: Sort with ____ from ____." and multi["back"].startswith("sort; `std::")
+
+
+def test_anki_export_is_a_clean_import_with_stable_ids_and_links_back(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET date='2026-09-01' WHERE id=?", (lid,))
+        con.execute("UPDATE cards SET back='a <b>\tc\nd' WHERE kind='qa'")
+    tsv = ll.anki_tsv(lecture_id=lid)
+    head, lines = tsv.splitlines()[:6], tsv.splitlines()[6:]
+    assert head == ["#separator:tab", "#html:true", "#guid column:1", "#notetype column:2", "#deck column:3",
+                    "#tags column:6"]
+    assert len(lines) == 2 and all(len(x.split("\t")) == 6 for x in lines)
+    cloze, qa = (x.split("\t") for x in lines)
+    assert cloze[1:4] == ["Cloze", "LectureLab::COP4020::2026-09-01 Grammars", "{{c1::BNF}} is how we write grammars"]
+    assert qa[1] == "Basic" and qa[4].startswith("a &lt;b&gt;    c<br>d<br><a href=\"http://127.0.0.1:")
+    assert f'?t=120#/lecture/{lid}">▶ 2:00</a>' in qa[4]
+    assert ll.anki_tsv(lecture_id=lid).splitlines()[6].split("\t")[0] == cloze[0]  # same GUID next time
+    assert ll.anki_tsv(lecture_id=lid + 99).count("\n") == 6  # headers only
+
+
+def test_search_finds_transcript_notes_and_slides_with_safe_snippets(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    hits = ll.search("recursion")
+    assert {h["kind"] for h in hits} >= {"transcript", "notes"} and all(h["lecture_id"] == lid for h in hits)
+    tr = next(h for h in hits if h["kind"] == "transcript")
+    assert tr["t"] == 100 and "<mark>recursion</mark>" in tr["snippet_html"]
+    assert ll.search("parsers loop")  # stemming: "parser loops" matches
+    assert ll.search("recurs")  # the last word is a prefix, for search-as-you-type
+    assert ll.search("grammar") and ll.search("") == [] and ll.search('"; DROP') == []
+    assert ll.search("recursion", course_id=ll.find_course("MML")["id"]) == []
+    with ll.db() as con:
+        con.execute("INSERT INTO segments(lecture_id, idx, start, end, text) VALUES (?, 99, 200, 210, ?)",
+                    (lid, "the <script>alert(1)</script> grammar"))
+    ll.index_lecture(lid)
+    snip = next(h for h in ll.search("alert") if h["kind"] == "transcript")["snippet_html"]
+    assert "<script>" not in snip and "&lt;script&gt;" in snip
+
+
+def test_lectures_from_before_search_get_indexed(ll):
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lec(ll, "Old one", cid, segs=[(0, 5, "monads are burritos according to nobody")])
+    assert ll.search("burritos") == []
+    assert ll.index_missing() == 1 and ll.search("burritos")[0]["lecture_id"] == lid
+    assert ll.index_missing() == 0
+
+
+def test_offline_notes_need_no_claude(ll, monkeypatch):
+    monkeypatch.setattr(ll, "_claude_run", lambda *a: pytest.fail("the offline generator must not call claude"))
+    cid = ll.find_course("COP4020")["id"]
+    words = "grammar parser lexer token derivation production terminal nonterminal".split()
+    segs = [(i * 20, i * 20 + 20, f"Now the {words[i % len(words)]} is the key idea we use in compilers today. "
+             f"Remember that every {words[(i + 3) % len(words)]} matters here.") for i in range(40)]
+    with ll.db() as con:
+        con.execute("UPDATE courses SET vocabulary=? WHERE id=?", ("\n".join(words), cid))
+    lid = _lec(ll, "Offline", cid, segs=segs)
+    res = ll.job_notes({"id": 0, "payload": {"lecture_id": lid, "mode": "offline"}})
+    assert res["mode"] == "offline" and res["sections"] >= 2 and res["cards"] > 0 and res["quiz"] > 0
+    n = ll.lecture_notes(lid)
+    assert n["generator"] == "offline" and "(#t=" in n["sections"][0]["markdown"]
+    q = ll.lecture_quiz(lid)["questions"][0]
+    assert len(q["choices"]) == 4 and "_____" in q["question"]
+
+
+def test_study_api(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    lid = _notes_done(ll, monkeypatch)
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    cards = c.get(f"/api/lectures/{lid}/cards").json()
+    assert len(cards) == 2 and c.get("/api/lectures/999/cards").status_code == 404
+    r = c.post(f"/api/cards/{cards[0]['id']}/review", json={"correct": True}).json()
+    assert r["card"]["box"] == 2
+    assert c.post(f"/api/cards/{cards[0]['id']}/undo", json={"before": r["before"]}).json()["box"] == 1
+    assert c.post("/api/cards/999/review", json={"correct": True}).status_code == 404
+    assert c.post(f"/api/cards/{cards[0]['id']}/undo", json={"before": {"box": 1}}).status_code == 422
+    assert c.get("/api/review").json()["total"] == 2
+    qs = c.get(f"/api/lectures/{lid}/quiz").json()["questions"]
+    out = c.post(f"/api/lectures/{lid}/quiz", json={"answers": [{"id": qs[0]["id"], "answer": "left"}]}).json()
+    assert out["score"] == 1
+    a = c.get(f"/api/anki.tsv?lecture_id={lid}")
+    assert a.status_code == 200 and "attachment" in a.headers["content-disposition"] and "#guid" in a.text
+    assert c.get("/api/search?q=recursion").json()[0]["lecture_id"] == lid
+
+
+# ---------------------------------------------------------------- Stage 5: export and sync
+
+def test_notes_export_to_ai_notes_with_frontmatter_and_links_back(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)  # saving notes exports them
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET date='2026-09-01', title='Grammars: BNF \"and\" more' WHERE id=?", (lid,))
+        con.execute("INSERT INTO sources(lecture_id, kind, url) VALUES (?, 'url', 'https://example.edu/rec/1')", (lid,))
+    notes, tr = ll.export_lecture(lid)
+    assert notes.parent == ll.NOTES_DIR / "COP4020"
+    assert notes.name == "2026-09-01 - Grammars_ BNF _and_ more.md"
+    assert tr.name == "2026-09-01 - Grammars_ BNF _and_ more - Transcript.md"
+    md = notes.read_text(encoding="utf-8")
+    assert md.startswith('---\ncourse: "COP4020"\n') and 'title: "Grammars: BNF \\"and\\" more"' in md
+    assert 'source_url: "https://example.edu/rec/1"' in md and 'duration: "0:10:00"' in md
+    assert "## Summary" in md and "## BNF" in md and "## Open questions" in md
+    assert "(#t=" not in md and f"(http://127.0.0.1:{ll.PORT}/?t=40#/lecture/{lid})" in md
+    assert "[Transcript](<2026-09-01 - Grammars_ BNF _and_ more - Transcript.md>)" in md
+    t = tr.read_text(encoding="utf-8")
+    assert 'kind: "transcript"' in t and "[0:01:40] left recursion means" in t
+    # renamed: re-exported under the new name, the old files gone
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET title='Context-free grammars' WHERE id=?", (lid,))
+    new_notes, new_tr = ll.export_lecture(lid)
+    assert new_notes.exists() and not notes.exists() and not tr.exists()
+    assert ll.get_lecture(lid)["status"] == "exported"
+    (ll.NOTES_DIR / "COP4020" / "mine.md").write_text("my own file", encoding="utf-8")
+    ll.export_lecture(lid)
+    assert (ll.NOTES_DIR / "COP4020" / "mine.md").exists()  # only files LectureLab wrote are ever removed
+
+
+def test_export_pending_catches_up_after_a_failed_export(ll, monkeypatch):
+    real = ll.export_lecture
+    monkeypatch.setattr(ll, "export_lecture", lambda lid: (_ for _ in ()).throw(OSError("drive missing")))
+    lid = _notes_done(ll, monkeypatch)
+    assert ll.lecture_notes(lid)["state"] == "done"  # the notes are kept even though the export failed
+    assert ll.export_pending() == 0
+    monkeypatch.setattr(ll, "export_lecture", real)
+    assert ll.export_pending() == 1 and ll.export_pending() == 0
+
+
+def _quiet_sync(ll, monkeypatch, server=False):
+    monkeypatch.setattr(ll, "canvas_state", lambda: {"state": "needs_signin"})
+    monkeypatch.setattr(ll, "inbox_roots", lambda: [])
+    monkeypatch.setattr(ll, "server_running", lambda: server)
+
+
+def test_sync_does_everything_new_once_and_nothing_the_second_time(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch)
+    ran = []
+    monkeypatch.setattr(ll, "job_transcribe", lambda job: ran.append("transcribe") or {"transcribed": []})
+    ll.JOB_HANDLERS["transcribe"] = ll.job_transcribe
+    _fake_claude(ll, monkeypatch, {"outline": OUTLINE, "section": _section, "logistics": _section,
+                                   "study": STUDY, "check": CHECK})
+    _lecture(ll, "queued_transcribe")
+    lid = _notes_lecture(ll)  # transcribed before Stage 4, no notes yet
+    out = ll.run_sync()
+    assert out["transcribe"] == 1 and out["notes"] == 1 and out["canvas"] == "needs sign-in"
+    assert ran == ["transcribe"] and ll.lecture_notes(lid)["state"] == "done"
+    assert ll.export_paths(ll.get_lecture(lid))[0].exists()
+    with ll.db() as con:  # the fake batch transcribed nothing; take it out of the picture
+        con.execute("UPDATE lectures SET status='error' WHERE status='queued_transcribe'")
+    assert ll.run_sync() == {"canvas": "needs sign-in"}  # nothing new
+    assert ran == ["transcribe"]
+
+
+def test_sync_leaves_the_queue_to_the_server_when_it_is_up(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch, server=True)
+    monkeypatch.setattr(ll, "run_job", lambda job: pytest.fail("the server runs jobs, not sync"))
+    lid = _notes_lecture(ll)
+    assert ll.run_sync() == {"canvas": "needs sign-in", "notes": 1}
+    with ll.db() as con:
+        assert con.execute("SELECT status FROM jobs WHERE kind='notes' AND lecture_id=?", (lid,)).fetchone()[0] == "queued"
+
+
+def test_only_one_sync_runs_at_a_time(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch)
+    lock = ll.FileLock(ll.DATA / "sync.lock")
+    assert lock.acquire()
+    try:
+        assert ll.run_sync() == {"skipped": "another sync is running"}
+    finally:
+        lock.release()
+
+
+def test_sync_skips_failed_notes_and_lectures_still_waiting_for_slides(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch, server=True)
+    cid = ll.find_course("COP4020")["id"]
+    failed = _notes_lecture(ll)
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET notes_error='Claude Code failed: x' WHERE id=?", (failed,))
+        con.execute("UPDATE courses SET canvas_id=11 WHERE id=?", (cid,))
+    waiting = _lec(ll, "Has video, course not scanned", cid, segs=_said([1, 2]), video="media/z/original.mp4")
+    assert ll.lecture_slides(waiting)["state"] == "waiting"
+    assert ll.queue_missing_notes() == 0
+
+
+def test_tidy_section_fixes_what_the_model_gets_wrong(ll):
+    md = ("## Section title\n\n- [▶ 32:28](#t=1948) > [!unclear] The lecturer says it's confusing\n\n"
+          "[▶ 1:00](#t=60): far outside\n\n> [!exam] kept as is")
+    out = ll.tidy_section(md, 1800, 2000)
+    assert out.splitlines()[0] == "> [!unclear] [▶ 32:28](#t=1948) The lecturer says it's confusing"
+    assert "(1:00): far outside" in out and "> [!exam] kept as is" in out and "Section title" not in out
+    assert ll.no_heading("## Summary\nThis lecture covers") == "This lecture covers"
+
+
+# ---------------------------------------------------------------- review fixes
+
+def test_sync_takes_a_new_inbox_file_in_one_pass(ll, monkeypatch, tmp_path):
+    _quiet_sync(ll, monkeypatch, server=True)
+    inbox = tmp_path / "inbox"
+    (inbox / "COP4020").mkdir(parents=True)
+    (inbox / "COP4020" / "lecture 9.mp4").write_bytes(b"\0" * 2048)
+    monkeypatch.setattr(ll, "inbox_roots", lambda: [(inbox, "inbox")])
+    assert ll.run_sync()["inbox"] == 1  # a fresh process every hour can't wait for a second look
+
+
+def test_sync_recovers_a_job_left_running_by_a_dead_run(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch)
+    lid = _notes_lecture(ll)
+    jid = ll.enqueue_notes(lid)
+    with ll.db() as con:
+        con.execute("UPDATE jobs SET status='running', owner_pid=99999999 WHERE id=?", (jid,))
+    ran = []
+    monkeypatch.setattr(ll, "run_job", lambda job: ran.append(job["id"]) or ll.job_update(job["id"], status="done"))
+    out = ll.run_sync()
+    assert out["recovered"] == 1 and jid in ran
+
+
+def test_sync_gives_up_on_a_recording_that_failed_three_times(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch, server=True)
+    lid = _lecture(ll, "queued_transcribe")
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET transcribe_fails=3 WHERE id=?", (lid,))
+    out = ll.run_sync()
+    assert "transcribe" not in out and out["transcribe_failing"] == 1
+    new = _lecture(ll, "queued_transcribe")  # a new recording doesn't drag the stuck one along
+    assert ll.run_sync()["transcribe"] == 1
+    with ll.db() as con:
+        payload = json.loads(con.execute("SELECT payload FROM jobs WHERE kind='transcribe'").fetchone()[0])
+    assert payload["lecture_ids"] == [new]
+
+
+def test_sync_writes_a_few_lectures_notes_at_a_time(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch, server=True)
+    for _ in range(5):
+        _notes_lecture(ll)
+    assert ll.run_sync()["notes"] == ll.SYNC_NOTES == 3
+    assert "notes" not in ll.run_sync()  # three still waiting (the usage limit): no more on top
+
+
+def test_exports_of_lectures_with_the_same_name_never_clobber_each_other(ll, monkeypatch):
+    a = _notes_done(ll, monkeypatch)
+    b = _notes_lecture(ll)  # same course, date and title
+    ll.job_notes({"id": 0, "payload": {"lecture_id": b}})
+    pa = ll.export_paths(ll.get_lecture(a))
+    with ll.db() as con:
+        pb = [ll.Path(p) for p in json.loads(con.execute("SELECT export_paths FROM notes WHERE lecture_id=?",
+                                                      (b,)).fetchone()[0])]
+    assert pa[0].exists() and pb[0].exists() and pa[0] != pb[0] and f"({b})" in pb[0].name
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET title='Lecture 3.1 Parsing basics' WHERE id=?", (a,))
+    assert ll.export_pending() == 1  # renamed: re-exported without being asked
+    new = ll.export_paths(ll.get_lecture(a))[0]
+    assert new.name.endswith("Lecture 3.1 Parsing basics.md") and new.exists() and not pa[0].exists()
+    assert pb[0].exists() and pb[1].exists()  # b's files survive a's rename
+    ll.delete_lecture(a)
+    assert not new.exists() and pb[0].exists()  # deleting a lecture takes its exports with it
+
+
+def test_notes_never_take_a_lecture_out_of_the_transcription_queue(ll, monkeypatch):
+    lid = _notes_lecture(ll)
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET status='queued_transcribe' WHERE id=?", (lid,))
+    _fake_claude(ll, monkeypatch, {"outline": OUTLINE, "section": _section, "logistics": _section,
+                                   "study": STUDY, "check": CHECK})
+    ll.enqueue_notes(lid)
+    assert ll.get_lecture(lid)["status"] == "queued_transcribe"
+    ll.job_notes({"id": 0, "payload": {"lecture_id": lid}})
+    assert ll.get_lecture(lid)["status"] == "queued_transcribe" and ll.lecture_notes(lid)["summary"]
+
+
+def test_notes_stay_stored_when_the_export_breaks(ll, monkeypatch):
+    monkeypatch.setattr(ll, "export_lecture", lambda lid: 1 / 0)
+    lid = _notes_done(ll, monkeypatch)
+    assert ll.lecture_notes(lid)["state"] == "done" and ll.get_lecture(lid)["notes_error"] is None
+
+
+def test_regenerating_keeps_review_progress_and_offline_never_replaces_claude(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    lid = _notes_done(ll, monkeypatch)
+    card = ll.due_cards(lecture_id=lid)["cards"][0]["id"]
+    ll.review_card(card, True)
+    ll.job_notes({"id": 0, "payload": {"lecture_id": lid}})  # every call cached: the same cards
+    with ll.db() as con:
+        assert con.execute("SELECT MAX(box) FROM cards WHERE lecture_id=?", (lid,)).fetchone()[0] == 2
+    with pytest.raises(ValueError):
+        ll.enqueue_notes(lid, "offline")
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    assert c.post(f"/api/lectures/{lid}/notes", json={"mode": "offline"}).status_code == 409
+    assert c.post(f"/api/lectures/{lid}/notes", json={"mode": "offline", "force": True}).status_code == 200
+
+
+def test_claude_never_sees_a_paid_route(ll, monkeypatch):
+    for k in ("anthropic_api_key", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+              "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_CUSTOM_HEADERS"):
+        monkeypatch.setenv(k, "x")
+    env = ll.claude_env()
+    assert not [k for k in env if k.upper().startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_BEARER"))]
+    assert env.get("PATH") or env.get("Path")
+
+
+def test_an_empty_answer_is_never_cached(ll, monkeypatch):
+    calls = []
+    _fake_claude(ll, monkeypatch, {"section": ""}, calls)
+    for _ in range(2):
+        with pytest.raises(ll.ClaudeError):
+            ll.claude_call("p", system=ll.SECTION_SYSTEM, kind="section")
+    assert len(calls) == 2 and not list(ll.CLAUDE_CACHE.glob("*.json"))
+
+
+def test_claude_signed_out_waits_instead_of_failing_every_lecture(ll, monkeypatch):
+    calls = []
+    _fake_claude(ll, monkeypatch, {"outline": (True, "Invalid API key · Please run /login")}, calls)
+    lid = _notes_lecture(ll)
+    with pytest.raises(ll.RetryLater):
+        ll.job_notes({"id": ll.enqueue_notes(lid), "payload": {"lecture_id": lid}})
+    lec = ll.get_lecture(lid)
+    assert lec["notes_error"] is None and lec["status"] == "transcribed"
+    with pytest.raises(ll.ClaudeUnavailable):  # parked: no second call for an hour
+        ll.claude_call("p", system=ll.OUTLINE_SYSTEM, kind="outline")
+    assert len(calls) == 1
+
+
+def test_check_edits_that_match_nothing_leave_the_notes_alone(ll):
+    secs = [{"markdown": "[▶ 0:10](#t=10) A is B. A is B.", "start": 0, "end": 60}]
+    skipped = ll.apply_check_edits(secs, [{"number": 1, "find": "A is B.", "replace": ""},
+                                          {"number": 1, "find": "nowhere", "replace": ""},
+                                          {"number": 9, "find": "A", "replace": ""},
+                                          {"number": 1, "find": secs[0]["markdown"], "replace": ""}])
+    assert secs[0]["markdown"] == "[▶ 0:10](#t=10) A is B. A is B." and [n for n, _ in skipped] == [1, 1, 1]
+
+
+def test_a_new_recording_makes_the_same_hours_batch(ll, monkeypatch):
+    _quiet_sync(ll, monkeypatch)
+    ran = []
+
+    def fake_run(job):
+        if job["kind"] == "ingest":
+            _lecture(ll, "queued_transcribe")
+        ran.append(job["kind"])
+        ll.job_update(job["id"], status="done")
+    monkeypatch.setattr(ll, "run_job", fake_run)
+    ll.enqueue("ingest", {"path": "inbox:x.mp4"})  # what the inbox scan queues
+    out = ll.run_sync()
+    assert out["transcribe"] == 1 and ran == ["ingest", "transcribe"]

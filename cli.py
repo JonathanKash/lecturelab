@@ -184,6 +184,59 @@ def cmd_slides(args) -> int:
     return 1 if failed else 0
 
 
+def cmd_notes(args) -> int:
+    """Write notes, flashcards and a quiz now (default: every transcribed lecture without notes).
+    Runs here, not in the server. Every Claude call is cached, so re-running costs nothing."""
+    ll.setup_logging(console=True)
+    with ll.db() as con:
+        ids = args.ids or [r[0] for r in con.execute(
+            "SELECT l.id FROM lectures l WHERE l.status NOT IN ('duplicate','ingesting') "
+            "AND EXISTS (SELECT 1 FROM segments s WHERE s.lecture_id=l.id) "
+            "AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.lecture_id=l.id) ORDER BY l.id")]
+    lock = ll.FileLock(ll.DATA / "sync.lock")  # one claude at a time: the laptop is short on memory
+    if not lock.acquire():
+        print("The hourly sync is running; try again when it's done.")
+        return 1
+    try:
+        return _notes(ids, args)
+    finally:
+        lock.release()
+
+
+def _notes(ids: list[int], args) -> int:
+    failed = 0
+    for lid in ids:
+        with ll.db() as con:
+            busy = con.execute("SELECT 1 FROM jobs WHERE kind='notes' AND lecture_id=? AND status='running'",
+                               (lid,)).fetchone()
+        if busy:
+            print(f"lecture {lid}: skipped, the server is working on it")
+            continue
+        try:
+            jid = ll.enqueue_notes(lid, "offline" if args.offline else "claude", force=args.force)
+        except ValueError as e:
+            print(f"lecture {lid}: {e} (--force)")
+            failed += 1
+            continue
+        job = ll.run_job_now(jid, wait_retry=False)
+        if job["status"] == "queued":  # the usage limit: the server picks it up after the reset
+            print(f"lecture {lid}: {job['progress']}")
+            break
+        print(f"lecture {lid}: {job['status']} {job['error'] or job['result']}")
+        failed += job["status"] != "done"
+    return 1 if failed else 0
+
+
+def cmd_sync(args) -> int:
+    """The whole cycle, for the hourly task: Canvas, inbox folders, one transcription batch,
+    notes, export. Safe to run any time; a second run straight after does nothing."""
+    ll.setup_logging(console=not args.quiet)
+    out = ll.run_sync(say=(lambda m: None) if args.quiet else (lambda m: print(f"  {m}", flush=True)))
+    if not args.quiet:
+        print("sync:", out or "nothing new")
+    return 0
+
+
 def cmd_colab_status(args) -> int:
     """Check the Colab CLI in WSL: login, compute units, running sessions."""
     ll.setup_logging(console=False)
@@ -240,6 +293,7 @@ def cmd_canvas_status(args) -> int:
 
 
 TASK_SERVER = "LectureLab Server"
+TASK_SYNC = "LectureLab Sync"
 
 
 def _ps(script: str) -> subprocess.CompletedProcess:
@@ -269,10 +323,29 @@ Register-ScheduledTask -TaskName '{TASK_SERVER}' -Action $action -Trigger $trigg
 """
 
 
+def sync_task_script() -> str:
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    arg = f'"{Path(__file__).resolve()}" sync --quiet'
+    return f"""
+$ErrorActionPreference = 'Stop'
+$action  = New-ScheduledTaskAction -Execute {_q(pythonw)} -Argument {_q(arg)} -WorkingDirectory {_q(ll.ROOT)}
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Hours 1)
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 12) -MultipleInstances IgnoreNew -StartWhenAvailable -Priority 7
+Register-ScheduledTask -TaskName '{TASK_SYNC}' -Action $action -Trigger $trigger -Settings $settings `
+    -Description 'LectureLab v2 hourly sync: Canvas, inboxes, transcription, notes, export' -Force | Out-Null
+'registered {TASK_SYNC}'
+"""
+
+
 def cmd_install_tasks(args) -> int:
-    """Register the logon task that keeps the server running (hidden, via pythonw)."""
+    """Register the logon task that keeps the server running (hidden, via pythonw) and the
+    hourly sync."""
     r = _ps(server_task_script())
     print(r.stdout.strip(), r.stderr.strip())
+    if r.returncode == 0:
+        r = _ps(sync_task_script())
+        print(r.stdout.strip(), r.stderr.strip())
     if r.returncode == 0 and args.start:
         print(_ps(f"Start-ScheduledTask -TaskName '{TASK_SERVER}'; 'started'").stdout.strip())
     return r.returncode
@@ -303,6 +376,11 @@ def main(argv=None) -> int:
     sl = sub.add_parser("slides", help="download queued decks and align slides now")
     sl.add_argument("ids", nargs="*", type=int, help="lecture ids (default: transcribed and not aligned yet)")
     sl.set_defaults(fn=cmd_slides)
+    nt = sub.add_parser("notes", help="write notes, flashcards and a quiz now")
+    nt.add_argument("ids", nargs="*", type=int, help="lecture ids (default: transcribed lectures without notes)")
+    nt.add_argument("--offline", action="store_true", help="no Claude: extractive notes only")
+    nt.add_argument("--force", action="store_true", help="with --offline: replace notes Claude wrote")
+    nt.set_defaults(fn=cmd_notes)
     sub.add_parser("colab-status", help="check Colab login, compute units and sessions").set_defaults(fn=cmd_colab_status)
     b = sub.add_parser("benchmark", help="pick the local CPU model by speed and accuracy")
     b.add_argument("lecture", type=int, help="a lecture with a Colab transcript to score against")
@@ -312,7 +390,10 @@ def main(argv=None) -> int:
         fn=cmd_canvas_login)
     sub.add_parser("canvas-status", help="check the Canvas session and list your courses").set_defaults(
         fn=cmd_canvas_status)
-    t = sub.add_parser("install-tasks", help="register the Windows logon task")
+    sy = sub.add_parser("sync", help="Canvas, inboxes, one transcription batch, notes, export (hourly task)")
+    sy.add_argument("--quiet", action="store_true", help="no console output (the scheduled task)")
+    sy.set_defaults(fn=cmd_sync)
+    t = sub.add_parser("install-tasks", help="register the logon task and the hourly sync")
     t.add_argument("--start", action="store_true", help="also start it now")
     t.set_defaults(fn=cmd_install_tasks)
     args = p.parse_args(argv)

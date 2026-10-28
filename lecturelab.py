@@ -23,6 +23,7 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date as Date, datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 # FastAPI names are module-level on purpose: with `from __future__ import annotations` every
@@ -386,6 +387,78 @@ MIGRATIONS = [
     # 8: Whisper sometimes emits a lone "." for chatter it can't make out; such lines say nothing
     """
     DELETE FROM segments WHERE trim(text, ' .,;:?!-''"…') = '';
+    """,
+    """
+    -- Stage 4: notes, flashcards, quiz, search, and a log of every claude call
+    CREATE TABLE claude_calls (
+        id           INTEGER PRIMARY KEY,
+        at           TEXT NOT NULL DEFAULT (datetime('now')),
+        lecture_id   INTEGER,
+        kind         TEXT,                    -- outline | section | study | check
+        model        TEXT,
+        input_hash   TEXT,                    -- = the cache file's name
+        cached       INTEGER NOT NULL,        -- 1: answered from the cache, no plan usage
+        ms           INTEGER,
+        in_tokens    INTEGER,
+        cache_tokens INTEGER,
+        out_tokens   INTEGER,
+        error        TEXT
+    );
+    CREATE TABLE notes (
+        lecture_id        INTEGER PRIMARY KEY REFERENCES lectures(id) ON DELETE CASCADE,
+        outline           TEXT NOT NULL,      -- JSON: every section, off-topic ones too
+        sections          TEXT NOT NULL,      -- JSON [{title, start, end, kind, slides, gist, markdown}]
+        summary           TEXT NOT NULL,
+        open_questions    TEXT NOT NULL DEFAULT '[]',
+        issues            TEXT NOT NULL DEFAULT '[]',  -- what the check pass removed or flagged, and why
+        removed           INTEGER NOT NULL DEFAULT 0,
+        flagged           INTEGER NOT NULL DEFAULT 0,
+        generator         TEXT NOT NULL,      -- claude | offline
+        transcript_source TEXT,               -- what the notes were written from: a change means they're stale
+        deck_id           INTEGER,
+        slides_aligned_at TEXT,
+        created_at        TEXT NOT NULL,
+        exported_at       TEXT,
+        export_paths      TEXT               -- JSON: the files written, so a renamed lecture leaves no old copy
+    );
+    CREATE TABLE cards (
+        id            INTEGER PRIMARY KEY,
+        lecture_id    INTEGER NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+        kind          TEXT NOT NULL,          -- cloze ({{c1::...}} in front) | qa
+        front         TEXT NOT NULL,
+        back          TEXT NOT NULL,
+        t             REAL,                   -- where it's taught, seconds
+        box           INTEGER NOT NULL DEFAULT 1,  -- Leitner box 1 to 5
+        due           TEXT,                   -- YYYY-MM-DD; NULL = new, due now
+        reviews       INTEGER NOT NULL DEFAULT 0,
+        lapses        INTEGER NOT NULL DEFAULT 0,
+        last_reviewed TEXT
+    );
+    CREATE INDEX cards_lecture ON cards(lecture_id);
+    CREATE TABLE quiz (
+        id          INTEGER PRIMARY KEY,
+        lecture_id  INTEGER NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+        idx         INTEGER NOT NULL,
+        kind        TEXT NOT NULL,            -- mcq | short
+        question    TEXT NOT NULL,
+        choices     TEXT NOT NULL DEFAULT '[]',
+        answer      TEXT NOT NULL,
+        explanation TEXT NOT NULL DEFAULT '',
+        t           REAL
+    );
+    CREATE INDEX quiz_lecture ON quiz(lecture_id);
+    CREATE TABLE quiz_attempts (
+        id          INTEGER PRIMARY KEY,
+        lecture_id  INTEGER NOT NULL REFERENCES lectures(id) ON DELETE CASCADE,
+        answers     TEXT NOT NULL,            -- JSON {question id: {answer, correct}}
+        score       INTEGER NOT NULL,
+        total       INTEGER NOT NULL,
+        at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE VIRTUAL TABLE search USING fts5(text, kind UNINDEXED, lecture_id UNINDEXED, t UNINDEXED,
+                                           tokenize='porter unicode61');
+    ALTER TABLE lectures ADD COLUMN notes_error TEXT;
+    ALTER TABLE lectures ADD COLUMN transcribe_fails INTEGER NOT NULL DEFAULT 0;
     """,
 ]
 
@@ -1187,7 +1260,18 @@ def release_duplicate(lecture_id: int) -> dict:
 
 def delete_lecture(lecture_id: int) -> None:
     with db() as con:
+        exported = con.execute("SELECT export_paths FROM notes WHERE lecture_id=?", (lecture_id,)).fetchone()
+        others = _others_exports(con, lecture_id)
+        con.execute("DELETE FROM search WHERE lecture_id=?", (lecture_id,))
         con.execute("DELETE FROM lectures WHERE id=?", (lecture_id,))
+    for p in json.loads((exported or [None])[0] or "[]"):
+        if p.lower() in others:
+            continue
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("couldn't remove the export %s: %s", p, e)
+    with db() as con:
         ocr = con.execute("DELETE FROM decks WHERE key=? RETURNING id", (f"ocr:{lecture_id}",)).fetchone()
     shutil.rmtree(DATA / "media" / str(lecture_id), ignore_errors=True)
     if ocr:  # its slides were read off its own video
@@ -1999,9 +2083,10 @@ def store_transcript(lecture_id: int, result: dict, source: str) -> int:
         con.executemany("INSERT INTO segments(lecture_id, idx, start, end, text, words) VALUES (?,?,?,?,?,?)",
                         [(lecture_id, i, s["start"], s["end"], s["text"], json.dumps(s.get("words") or []))
                          for i, s in enumerate(segs)])
-        con.execute("UPDATE lectures SET status='transcribed', transcript_source=?, error=NULL, "
+        con.execute("UPDATE lectures SET status='transcribed', transcript_source=?, error=NULL, transcribe_fails=0, "
                     "slides_aligned_at=NULL, updated_at=datetime('now') WHERE id=?", (source, lecture_id))
     log.info("lecture %s transcribed by %s: %s segments", lecture_id, source, len(segs))
+    index_lecture(lecture_id)
     enqueue_slides(lecture_id)  # (re)align: the old slide numbers went with the old segments
     return len(segs)
 
@@ -2424,8 +2509,8 @@ def job_transcribe(job: dict) -> dict:
             with db() as con:
                 for l in lectures:
                     if l["id"] not in done:
-                        con.execute("UPDATE lectures SET status='queued_transcribe' WHERE id=? AND status='transcribing'",
-                                    (l["id"],))
+                        con.execute("UPDATE lectures SET status='queued_transcribe', transcribe_fails=transcribe_fails+1 "
+                                    "WHERE id=? AND status='transcribing'", (l["id"],))
     finally:
         stay_awake(False)
         lock.release()
@@ -2466,7 +2551,8 @@ def reset_stuck_transcribing() -> int:
         return 0  # a batch is genuinely running
     try:
         with db() as con:
-            n = con.execute("UPDATE lectures SET status='queued_transcribe' WHERE status='transcribing'").rowcount
+            n = con.execute("UPDATE lectures SET status='queued_transcribe', transcribe_fails=transcribe_fails+1 "
+                            "WHERE status='transcribing'").rowcount
             con.execute("UPDATE transcribe_batches SET ok=0, error='interrupted (the process stopped mid-batch)', "
                         "ended_at=datetime('now') WHERE ended_at IS NULL")
     finally:
@@ -2504,7 +2590,7 @@ def user_error(e: Exception, what: str) -> str:
     """What to show for a failure: our own messages as they are. Anything else (ffmpeg's stderr,
     a timeout's command line, an OS error) can carry local paths, so it gets a generic line and
     the detail goes to server.log."""
-    if isinstance(e, (DeckError, CanvasError)):
+    if isinstance(e, (DeckError, CanvasError, ClaudeError, QuotaExceeded)):
         return str(e)
     log.warning("%s failed: %r", what, e)
     return f"{what} failed unexpectedly ({type(e).__name__}). The details are in server.log."
@@ -3205,6 +3291,39 @@ def align_lecture(lecture_id: int) -> int:
     return sum(no is not None for no in nos)
 
 
+def read_uploaded_deck(deck: dict, say, lecture_id: int) -> None:
+    """Read a deck you attached (the request only checked it), then line up every other lecture
+    that uses it. A file that can't be read marks the deck as an error, so the lecture shows what
+    to do; anything else (OCR timing out, a locked database) fails only this job, and "Look for
+    slides again" reads it again."""
+    msg = None
+    try:
+        extract_deck(deck["id"], say)
+    except DeckError as e:
+        msg = str(e)
+    if msg:
+        with db() as con:
+            con.execute("DELETE FROM slides WHERE deck_id=?", (deck["id"],))
+            con.execute("UPDATE decks SET status='error', error=? WHERE id=?", (msg, deck["id"]))
+        raise DeckError(msg)
+    with db() as con:
+        others = [r[0] for r in con.execute("SELECT id FROM lectures WHERE deck_id=? AND id!=?",
+                                            (deck["id"], lecture_id))]
+    for lid in others:  # this job's own lecture is lined up next, right here
+        enqueue_slides(lid)
+
+
+def reread_upload(deck_id: int, pages: int | None = None) -> None:
+    """An attached deck goes back to being read: its error clears on every lecture using it, and
+    each one is queued to line it up once the read is done."""
+    with db() as con:
+        con.execute("UPDATE decks SET status='new', error=NULL, pages=COALESCE(?, pages) WHERE id=?", (pages, deck_id))
+        lids = [r[0] for r in con.execute("SELECT id FROM lectures WHERE deck_id=?", (deck_id,))]
+        con.execute(f"UPDATE lectures SET slides_error=NULL WHERE id IN ({','.join('?' * len(lids))})", lids)
+    for lid in lids:
+        enqueue_slides(lid)
+
+
 def job_slides(job: dict) -> dict:
     """payload: {lecture_id}. Find the lecture's deck (or read slides off its video), then align."""
     lid = job["payload"]["lecture_id"]
@@ -3240,6 +3359,9 @@ def job_slides(job: dict) -> dict:
         deck = get_deck(lec["deck_id"])
         if not deck:
             return {"skipped": "the deck was removed"}
+        if deck["status"] == "new" and deck["source"] == "upload":
+            read_uploaded_deck(deck, say, lid)
+            deck = get_deck(deck["id"])
         if deck["status"] == "new":
             return {"waiting": "downloading the slides"}  # the download queues this lecture again
         if deck["status"] == "error":
@@ -3275,8 +3397,14 @@ def _download_deck(deck: dict, tmp: Path) -> Path:
 
 
 def retry_deck(deck_id: int) -> bool:
-    """Download a deck that failed again (you asked to retry). False if there's nothing to fetch."""
+    """Download a deck that failed again (you asked to retry), or read an attached one again if
+    its file is still here. False if there's nothing to fetch."""
     deck = get_deck(deck_id)
+    if deck and deck["status"] == "error" and deck["source"] == "upload" and deck["path"] \
+            and (DATA / deck["path"]).is_file():
+        reread_upload(deck_id)
+        wake_workers()
+        return True
     if not deck or deck["status"] != "error" or deck["source"] not in ("canvas", "drive"):
         return False
     with db() as con:
@@ -3432,7 +3560,8 @@ def lecture_slides(lecture_id: int) -> dict:
         state = "aligned"
     elif deck:
         state = "waiting"
-        reason = ("downloading the slides" if deck["status"] == "new" else "no transcript yet" if not transcribed
+        reason = (("reading the slides" if deck["source"] == "upload" else "downloading the slides")
+                  if deck["status"] == "new" else "no transcript yet" if not transcribed
                   else "queued")
     elif lec["deck_how"] == "manual":
         state, reason = "none", "You chose no slides for this lecture."
@@ -3494,9 +3623,50 @@ def set_lecture_deck(lecture_id: int, deck_id: int | None) -> dict:
     return lecture_slides(lecture_id)
 
 
+def check_deck_file(path: Path) -> int | None:
+    """A quick look at an uploaded deck (open it, count its pages), so a bad file is turned away
+    while you wait; reading and rendering the pages is the slides job's. Returns the page count
+    (None for a .ppt, which only LibreOffice can open)."""
+    import zipfile
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        import pymupdf as fitz
+        try:
+            doc = fitz.open(path)
+        except Exception as e:  # the library's message names our file path: log it, don't show it
+            log.warning("upload: can't open %s: %s", path.name, str(e))  # text only: a kept record can't hold the file
+            raise DeckError("This PDF couldn't be opened; it may be damaged or not really a PDF. "
+                            "Export it again and attach that.") from e
+        with doc:
+            if doc.needs_pass:
+                raise DeckError("This PDF is password-protected. Export a copy without a password and attach that.")
+            n = doc.page_count
+    elif ext == ".pptx":
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = z.namelist()
+        except (zipfile.BadZipFile, OSError):
+            names = []
+        if "ppt/presentation.xml" not in names:
+            raise DeckError("This PowerPoint couldn't be read. Export it as PDF and attach that.")
+        n = sum(bool(re.fullmatch(r"ppt/slides/slide\d+\.xml", x)) for x in names)
+    else:  # .ppt: an OLE compound file
+        with open(path, "rb") as f:
+            if f.read(8) != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                raise DeckError("This .ppt couldn't be read. Save it as PDF or .pptx and attach that.")
+        return None
+    if n == 0:
+        raise DeckError("This deck has no pages. Export it again and attach that.")
+    if n > MAX_DECK_PAGES:
+        raise DeckError(f"This deck has {n} pages, more than a lecture's slides (it may be a textbook or a "
+                        "reader). Attach the lecture's own deck instead.")
+    return n
+
+
 def attach_deck_upload(lecture_id: int, filename: str, fileobj) -> dict:
-    """An uploaded PDF/PPTX for this lecture: stored under Slides/<Course>/, read right away (so a
-    bad file is reported to you, not to the job queue), then set as your pick."""
+    """An uploaded PDF/PPTX for this lecture: checked right away (so a bad file is reported to you,
+    not to the job queue), stored under Slides/<Course>/ and set as your pick. The slides job
+    reads its pages before lining them up."""
     lec = get_lecture(lecture_id)
     if not lec:
         raise KeyError(lecture_id)
@@ -3517,11 +3687,26 @@ def attach_deck_upload(lecture_id: int, filename: str, fileobj) -> dict:
                                              "Export a smaller PDF (without embedded video) and attach that.")
                 h.update(chunk)
                 out.write(chunk)
+        msg = None
+        try:
+            pages = check_deck_file(tmp)
+        except DeckError as e:
+            msg = str(e)
+        except Exception as e:
+            log.warning("upload for lecture %s: can't check %s: %s", lecture_id, name, str(e))
+            msg = "This file couldn't be read. Export it as PDF and attach that."
+        if msg:  # out here, the failure's traceback (which holds the file open) is gone, so it can be removed
+            raise HTTPException(422, msg)
         key = f"upload:{h.hexdigest()}"
         with db() as con:
-            r = con.execute("SELECT id, status FROM decks WHERE course_id IS ? AND key=?", (lec["course_id"], key)).fetchone()
-        if r and r["status"] == "ready":
+            r = con.execute("SELECT id, status, path FROM decks WHERE course_id IS ? AND key=?",
+                            (lec["course_id"], key)).fetchone()
+        stored = bool(r and r["path"] and (DATA / r["path"]).is_file())
+        if stored and r["status"] in ("ready", "new"):  # read already, or being read
             did = r["id"]
+        elif stored:  # the same bytes failed before (or were interrupted): read them again
+            did = r["id"]
+            reread_upload(did, pages)
         else:
             folder = SLIDES_DIR / safe_filename(lec.get("course_code") or "Unsorted", "Unsorted")
             folder.mkdir(parents=True, exist_ok=True)
@@ -3530,35 +3715,24 @@ def attach_deck_upload(lecture_id: int, filename: str, fileobj) -> dict:
                 dest = dest.with_name(f"{dest.stem} ({h.hexdigest()[:8]}){dest.suffix}")
             shutil.move(str(tmp), dest)
             rel = dest.relative_to(DATA).as_posix()
-            with db() as con:
-                if r:
-                    did = r["id"]
-                    con.execute("UPDATE decks SET path=?, status='new', error=NULL WHERE id=?", (rel, did))
-                else:
-                    did = con.execute("INSERT INTO decks(course_id, key, source, title, path, created_at) "
-                                      "VALUES (?,?,?,?,?,date('now'))",
-                                      (lec["course_id"], key, "upload", Path(name).stem, rel)).lastrowid
-            msg = None
             try:
-                extract_deck(did)
-            except Exception as e:
-                if isinstance(e, DeckError):
-                    msg = str(e)
-                else:
-                    log.warning("upload for lecture %s: can't read %s: %r", lecture_id, name, e)
-                    msg = "This file couldn't be read. Export it as PDF and attach that."
-            if msg:  # out here, the failure's traceback (which can hold the file open) is gone
-                # nothing refers to a deck that never worked: drop it, so a retry starts clean
                 with db() as con:
-                    con.execute("DELETE FROM slides WHERE deck_id=?", (did,))
-                    con.execute("DELETE FROM decks WHERE id=? AND NOT EXISTS (SELECT 1 FROM lectures "
-                                "WHERE deck_id=?)", (did, did))
-                try:
-                    dest.unlink(missing_ok=True)
-                except OSError as e:
-                    log.warning("upload for lecture %s: can't remove %s: %s", lecture_id, dest, e)
-                shutil.rmtree(SLIDE_IMAGES / str(did), ignore_errors=True)
-                raise HTTPException(422, msg)
+                    if r:  # its file is gone: this copy takes its place
+                        did = r["id"]
+                        con.execute("UPDATE decks SET path=?, pages=?, status='new', error=NULL WHERE id=?",
+                                    (rel, pages, did))
+                    else:
+                        did = con.execute("INSERT INTO decks(course_id, key, source, title, path, pages, created_at) "
+                                          "VALUES (?,?,?,?,?,?,date('now'))",
+                                          (lec["course_id"], key, "upload", Path(name).stem, rel, pages)).lastrowid
+            except sqlite3.IntegrityError:  # the same file attached twice at once: the other request stored it
+                dest.unlink(missing_ok=True)
+                with db() as con:
+                    did = con.execute("SELECT id FROM decks WHERE course_id IS ? AND key=?",
+                                      (lec["course_id"], key)).fetchone()[0]
+            except BaseException:
+                dest.unlink(missing_ok=True)
+                raise
     finally:
         tmp.unlink(missing_ok=True)
     return set_lecture_deck(lecture_id, did)
@@ -3639,6 +3813,1220 @@ def benchmark_local(lecture_id: int, start: float = 120, length: float = 120) ->
     meta_set("benchmark", report)
     meta_set("local_model", pick)
     return report
+
+
+# ---------------------------------------------------------------- notes
+
+# Notes come from Claude Code in headless mode on the Max plan: `claude -p`, never the API.
+CLAUDE_WORK = DATA / "claude-work"    # an empty folder to run claude in: no project CLAUDE.md gets picked up
+CLAUDE_CACHE = DATA / "claude-cache"  # <sha256 of the inputs>.json: asking the same thing again costs nothing
+CLAUDE_TIMEOUT = float(os.environ.get("LECTURELAB_CLAUDE_TIMEOUT", 1800))
+NOTES_MODEL, CHECK_MODEL = "sonnet", "opus"  # opus only for the check pass
+# One claude process at a time by default: each is a few hundred MB and this laptop runs short.
+_claude_slot = threading.BoundedSemaphore(max(1, int(os.environ.get("LECTURELAB_CLAUDE_PARALLEL", 1))))
+API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")  # either would bill the API, not the plan
+
+
+class ClaudeError(Exception):
+    """claude -p failed; the message is fit to show."""
+
+
+class QuotaExceeded(Exception):
+    """The plan's usage limit is reached: notes wait until it resets."""
+
+    def __init__(self, msg: str, reset_at: float):
+        super().__init__(msg)
+        self.reset_at = reset_at
+
+
+class ClaudeUnavailable(QuotaExceeded):
+    """Claude Code is signed out or missing. Nothing is the lecture's fault: every call waits an hour
+    and tries again, instead of marking each lecture's notes as failed."""
+
+
+AUTH_RE = re.compile(r"(?i)invalid api key|/login|not (logged|signed) in|log ?in again|oauth token|authenticat")
+
+
+def claude_exe() -> str:
+    """claude.exe itself: a .cmd shim would mangle the multi-line system prompt and schema."""
+    p = Path.home() / ".local" / "bin" / "claude.exe"
+    found = str(p) if p.exists() else shutil.which("claude.exe")
+    if not found:
+        raise ClaudeError("Claude Code isn't installed. Install it and sign in with your Max plan.")
+    return found
+
+
+def _paid_route(name: str) -> bool:
+    """Variables that would make claude bill something other than the Max plan: API keys, a custom
+    base URL or headers, and the Bedrock, Vertex and Foundry switches."""
+    k = name.upper()
+    return k in API_KEY_VARS or k.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_")) or k == "AWS_BEARER_TOKEN_BEDROCK"
+
+
+def claude_env() -> dict:
+    """os.environ without any of those, so claude bills the Max plan. Refuses if one is still visible."""
+    env = {k: v for k, v in os.environ.items() if not _paid_route(k)}
+    if any(_paid_route(k) for k in env):
+        raise RuntimeError("refusing to call claude: an Anthropic API key would be visible to it")
+    return env
+
+
+QUOTA_RE = re.compile(r"(?i)\b(usage|session|weekly|5-hour|opus|sonnet)\s+limit|limit reached|hit your (\w+ )?limit")
+
+
+def quota_reset_at(text: str, now: float | None = None) -> float:
+    """When the limit resets, from claude's message ("...limit reached|1793170800" or "resets 3pm");
+    an hour from now when it doesn't say."""
+    now = time.time() if now is None else now
+    if m := re.search(r"\|(\d{10})\b", text):
+        return float(m[1])
+    if m := re.search(r"(?i)resets?\s+(?:at\s+)?(\d{1,2})(?::(\d\d))?\s*([ap])\.?m", text):
+        hour = int(m[1]) % 12 + (12 if m[3].lower() == "p" else 0)
+        t = datetime.fromtimestamp(now).replace(hour=hour, minute=int(m[2] or 0), second=0, microsecond=0)
+        ts = t.timestamp()
+        return (ts if ts > now else ts + 86400) + 120  # a little past the reset
+    return now + 3600
+
+
+def _claude_run(cmd: list[str], prompt: str, timeout: float) -> subprocess.CompletedProcess:
+    CLAUDE_WORK.mkdir(parents=True, exist_ok=True)
+    with _claude_slot:
+        return subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              env=claude_env(), cwd=CLAUDE_WORK, timeout=timeout, creationflags=NO_WINDOW)
+
+
+def _log_call(lecture_id, kind, model, key, cached, ms=None, usage=None, error=None) -> None:
+    u = usage or {}
+    with db() as con:
+        con.execute("INSERT INTO claude_calls(lecture_id, kind, model, input_hash, cached, ms, in_tokens, "
+                    "cache_tokens, out_tokens, error) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (lecture_id, kind, model, key, int(cached), ms, u.get("input_tokens"),
+                     (u.get("cache_read_input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
+                     u.get("output_tokens"), error))
+    if not cached:
+        log.info("claude %s %s lecture %s: %s ms, %s out tokens%s", model, kind, lecture_id, ms,
+                 u.get("output_tokens"), f", error: {error}" if error else "")
+
+
+def claude_call(prompt: str, *, system: str, model: str = NOTES_MODEL, schema: dict | None = None,
+                lecture_id: int | None = None, kind: str = "", timeout: float = CLAUDE_TIMEOUT):
+    """The only way LectureLab calls Claude. Runs `claude -p` on the Max plan with no API key in its
+    environment, cut off from your own Claude Code setup (no hooks, CLAUDE.md, MCP servers or tools:
+    they'd add tens of thousands of tokens to every call). Never --bare: it forces API-key auth.
+    The prompt goes in on stdin (a transcript is far past Windows' 32 KB command line).
+    Returns the text, or the parsed object when a JSON schema is given. Cached by input hash.
+    Raises QuotaExceeded when the plan's limit is hit, and keeps refusing until it resets."""
+    key = hashlib.sha256(json.dumps([model, system, schema, prompt], sort_keys=True).encode()).hexdigest()
+    path = CLAUDE_CACHE / f"{key}.json"
+    if path.exists():
+        _log_call(lecture_id, kind, model, key, True)
+        return json.loads(path.read_text(encoding="utf-8"))["output"]
+    if (until := meta_get("claude_quota_until", 0)) > time.time():
+        raise QuotaExceeded(f"Claude's usage limit is reached; trying again after "
+                            f"{datetime.fromtimestamp(until):%H:%M}.", until)
+    if (down := meta_get("claude_down", {})).get("until", 0) > time.time():
+        raise ClaudeUnavailable(down["msg"], down["until"])
+    if os.environ.get("LECTURELAB_CLAUDE") == "off":  # test servers: never spend the plan
+        raise ClaudeUnavailable("Claude is turned off on this server (LECTURELAB_CLAUDE=off).", time.time() + 3600)
+    try:
+        exe = claude_exe()
+    except ClaudeError as e:
+        raise _claude_down(str(e)) from None
+    cmd = [exe, "-p", "--model", model, "--output-format", "json", "--no-session-persistence",
+           "--setting-sources=", "--strict-mcp-config", "--tools=", "--system-prompt", system]
+    if schema:
+        cmd += ["--json-schema", json.dumps(schema)]
+    t0 = time.time()
+    try:
+        r = _claude_run(cmd, prompt, timeout)
+    except subprocess.TimeoutExpired as e:
+        _log_call(lecture_id, kind, model, key, False, int((time.time() - t0) * 1000), error="timeout")
+        raise ClaudeError(f"Claude didn't answer within {timeout / 60:.0f} minutes.") from e
+    ms = int((time.time() - t0) * 1000)
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        d = {"is_error": True, "result": ((r.stdout or "")[-400:] + "\n" + (r.stderr or "")[-400:]).strip()}
+    msg = str(d.get("result") or "")
+    if d.get("is_error") or r.returncode:
+        if QUOTA_RE.search(msg) or d.get("api_error_status") == 429:
+            reset = quota_reset_at(msg) if QUOTA_RE.search(msg) else time.time() + 900
+            meta_set("claude_quota_until", reset)
+            _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"), "usage limit")
+            raise QuotaExceeded(f"Claude's usage limit is reached; trying again after "
+                                f"{datetime.fromtimestamp(reset):%H:%M}.", reset)
+        _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"), msg[:300] or f"exit {r.returncode}")
+        if AUTH_RE.search(msg):
+            raise _claude_down("Claude Code is signed out. Run claude in a terminal and sign in with your "
+                               "Max plan; notes carry on within the hour.")
+        raise ClaudeError(f"Claude Code failed: {msg[:300] or f'exit code {r.returncode}'}")
+    out = msg
+    if schema:
+        out = d.get("structured_output")
+        if out is None:
+            try:
+                out = json.loads(msg)
+            except ValueError:
+                raise ClaudeError("Claude's answer wasn't the JSON that was asked for.") from None
+    if not out:  # never cache an empty answer: it would come back empty forever
+        _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"), "empty answer")
+        raise ClaudeError("Claude's answer was empty.")
+    CLAUDE_CACHE.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"model": model, "kind": kind, "output": out}), encoding="utf-8")
+    tmp.replace(path)
+    _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"))
+    return out
+
+
+def _claude_down(msg: str) -> ClaudeUnavailable:
+    until = time.time() + 3600
+    meta_set("claude_down", {"until": until, "msg": msg})
+    log.warning("claude unavailable until %s: %s", datetime.fromtimestamp(until).strftime("%H:%M"), msg)
+    return ClaudeUnavailable(msg, until)
+
+
+def fmt_t(sec: float) -> str:
+    s = int(sec)
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
+def jump(sec: float) -> str:
+    return f"[▶ {fmt_t(sec)}](#t={int(sec)})"
+
+
+def transcript_text(segs: list[dict], titles: dict[int, str] | None = None, max_sec: float = 25,
+                    max_chars: int = 320, clock=None) -> str:
+    """Segments as "[m:ss] text" lines of up to ~25 s (Whisper's segments can be single words),
+    with a "--- Slide N: title ---" line wherever the lecture moves to another slide."""
+    out, cur, slide = [], None, None
+    for s in segs:
+        if s.get("slide_no") and s["slide_no"] != slide:
+            slide = s["slide_no"]
+            if cur:
+                out.append(cur)
+                cur = None
+            title = (titles or {}).get(slide) or ""
+            out.append(f"--- Slide {slide}{': ' + title if title else ''} ---")
+        if cur and (s["start"] - cur[0] > max_sec or len(cur[1]) > max_chars):
+            out.append(cur)
+            cur = None
+        cur = [cur[0], cur[1] + " " + s["text"].strip()] if cur else [s["start"], s["text"].strip()]
+    if cur:
+        out.append(cur)
+    return "\n".join(x if isinstance(x, str) else f"[{(clock or fmt_t)(x[0])}] {x[1]}" for x in out)
+
+
+def notes_inputs(lecture_id: int) -> dict:
+    lec = get_lecture(lecture_id)
+    if not lec:
+        raise KeyError(lecture_id)
+    course = find_course(lec["course_id"]) if lec["course_id"] else None
+    with db() as con:
+        segs = rows(con.execute("SELECT start, end, text, slide_no FROM segments WHERE lecture_id=? ORDER BY idx",
+                                (lecture_id,)))
+        slides = rows(con.execute("SELECT no, title, text FROM slides WHERE deck_id=? ORDER BY no",
+                                  (lec["deck_id"] or -1,)))
+    return {"lec": lec, "course": course, "segs": segs, "slides": {s["no"]: s for s in slides},
+            "duration": max([lec["duration_sec"] or 0] + [s["end"] for s in segs])}
+
+
+def _header(inp: dict) -> str:
+    lec, c = inp["lec"], inp["course"]
+    vocab = ", ".join(v.strip() for v in (c or {}).get("vocabulary", "").splitlines() if v.strip())
+    return (f"Course: {c['code']} {c['name']}\n" if c else "") + (f"Course vocabulary: {vocab}\n" if vocab else "") + \
+        f"Lecture: {lec['title']}" + (f" ({lec['date']})" if lec["date"] else "") + \
+        f", {fmt_t(inp['duration'])} long\n"
+
+
+def _slide_block(inp: dict, nos) -> str:
+    out = []
+    for no in sorted(set(nos)):
+        s = inp["slides"].get(no)
+        if s:
+            body = re.sub(r"\n{3,}", "\n\n", (s["text"] or "").strip())[:2500]
+            out.append(f"[Slide {no}] {s['title'] or ''}\n{body}".strip())
+    return "\n\n".join(out)
+
+
+OUTLINE_SYSTEM = """You outline university lecture recordings so study notes can be written one section at a time.
+
+Split the lecture into sections, one per coherent topic, in order, covering the whole recording without gaps or overlaps. Aim for sections of roughly 5 to 12 minutes; a short recording may be one or two sections. Use the times in the transcript ([m:ss], seconds from the start) for start and end, in seconds. List the slide numbers each section uses ("--- Slide N ---" lines mark when the lecturer moved to slide N).
+
+kind: "content" for teaching; "logistics" for announcements, deadlines, exam dates and course admin; "off-topic" for chatter before the lecture starts, breaks, or students talking among themselves. Keep logistics and off-topic as their own sections so they don't mix into the teaching.
+
+title: a specific topic title a student would scan for ("Left recursion and why LL parsers can't handle it", not "Part 2"). gist: one sentence on what the section teaches.
+
+The transcript is automatic speech recognition, so technical terms may be misheard; use the slides and the course vocabulary to read them correctly."""
+
+OUTLINE_SCHEMA = {
+    "type": "object", "required": ["sections"],
+    "properties": {"sections": {"type": "array", "minItems": 1, "items": {
+        "type": "object", "required": ["title", "start", "end", "kind", "slides", "gist"],
+        "properties": {"title": {"type": "string"}, "start": {"type": "number"}, "end": {"type": "number"},
+                       "kind": {"type": "string", "enum": ["content", "logistics", "off-topic"]},
+                       "slides": {"type": "array", "items": {"type": "integer"}}, "gist": {"type": "string"}}}}}}
+
+
+def clean_outline(sections: list[dict], duration: float, min_sec: float = 20) -> list[dict]:
+    """Sorted, contiguous from 0 to the end, with slivers merged into their neighbour."""
+    secs = sorted((dict(s) for s in sections if s.get("title")), key=lambda s: float(s["start"]))
+    out: list[dict] = []
+    for s in secs:
+        s["start"] = min(max(0.0, float(s["start"])), duration)
+        if out and s["start"] - out[-1]["start"] < min_sec:
+            out[-1]["slides"] = sorted(set(out[-1]["slides"]) | set(s.get("slides") or []))
+            continue
+        s["slides"] = sorted({int(n) for n in s.get("slides") or [] if int(n) > 0})
+        out.append(s)
+    if not out:
+        return [{"title": "Lecture", "start": 0.0, "end": duration, "kind": "content", "slides": [], "gist": ""}]
+    out[0]["start"] = 0.0
+    for a, b in zip(out, out[1:]):
+        a["end"] = b["start"]
+    out[-1]["end"] = duration
+    if len(out) > 1 and out[-1]["end"] - out[-1]["start"] < min_sec:
+        out[-2]["end"] = out[-1]["end"]
+        out[-2]["slides"] = sorted(set(out[-2]["slides"]) | set(out[-1]["slides"]))
+        out.pop()
+    return out
+
+
+SECTION_SYSTEM = """You write one section of study notes for a university lecture, from its transcript and slides. The student reading them missed the lecture and won't rewatch it, so the notes must carry everything the lecturer taught in this part: every concept, definition, example, caveat, and anything the lecturer stressed.
+
+Rules:
+- Use only what the lecturer said and what the slides show. Don't add facts, examples or explanations from your own knowledge. If you can't tell what was meant, say so in an [!unclear] callout instead of guessing.
+- The transcript is automatic speech recognition. Silently fix misheard technical terms using the slides and the course vocabulary (for example "back us now are form" is "Backus-Naur Form").
+- Write Markdown and start straight with the content: no heading for the section (one is added for you), no preamble, no closing summary.
+- Cover only this section's part of the lecture. Other sections of the outline are written separately, so don't repeat what they cover.
+- The slides given may include ones the lecturer skipped or hasn't reached yet. Write up a slide only as far as the transcript of this section discusses it.
+- Use ### subheadings when the section covers more than one idea.
+- Start each subtopic, or each paragraph where the lecture moves on, with a jump link like [▶ 12:34](#t=754): 12:34 is a time from the transcript lines and 754 is that same time in whole seconds. Only use times that appear in the transcript you're given.
+- Cite slides inline, like (Slide 7) or (Slides 7 to 9), where a point comes from a slide.
+- Definitions: **Term**: what it means, in the lecturer's sense.
+- Worked examples: reproduce them step by step as the lecturer did, including the result.
+- Code goes in fenced blocks with a language (```java, ```python, ```haskell, ...). Grammars go in ```ebnf or ```bnf blocks. Keep code as shown on the slides or dictated; don't write code the lecture didn't have.
+- Math in KaTeX: $...$ inline, $$...$$ on its own line.
+- Callouts are blockquotes that start with a tag:
+  > [!exam] when the lecturer says something will be on an exam, quiz or homework, or must be known.
+  > [!emphasis] when the lecturer stresses or repeats a point.
+  > [!unclear] when the explanation or the audio is unclear, or the lecturer contradicts themselves; say what is unclear.
+- Plain, direct sentences. Bullets for lists of facts, prose for reasoning. No filler."""
+
+LOGISTICS_SYSTEM = """You write the course-logistics part of a lecture's study notes: announcements, deadlines, exam dates and format, grading, office hours. Use only what the transcript says. Markdown bullets, each starting with a jump link like [▶ 12:34](#t=754) (a time from the transcript and the same time in whole seconds). Put anything about what will be on an exam in a > [!exam] callout. No heading, no preamble. If nothing in it matters to a student, reply with exactly: (nothing to note)"""
+
+
+def _section_prompt(inp: dict, outline: list[dict], i: int) -> str:
+    sec = outline[i]
+    segs = [s for s in inp["segs"] if sec["start"] - 1 <= s["start"] < sec["end"]]
+    nos = set(sec["slides"]) | {s["slide_no"] for s in segs if s["slide_no"]}
+    titles = {n: (s["title"] or "") for n, s in inp["slides"].items()}
+    lines = "\n".join(f"{'►' if j == i else ' '} {j + 1}. {s['title']} ({fmt_t(s['start'])} to {fmt_t(s['end'])})"
+                      for j, s in enumerate(outline))
+    slides = _slide_block(inp, nos)
+    return (_header(inp) + f"\nOutline of the whole lecture (write the section marked ►):\n{lines}\n"
+            + (f"\nSlides for this section:\n{slides}\n" if slides else "\nThis lecture has no slides.\n")
+            + "\nTranscript of this section (times are m:ss from the start of the recording):\n"
+            + transcript_text(segs, titles))
+
+
+def no_heading(md: str) -> str:
+    return re.sub(r"\A\s*#{1,2} [^\n]*\n+", "", md.strip())
+
+
+def tidy_section(md: str, start: float, end: float, margin: float = 90) -> str:
+    """Drop a heading the model added anyway, and jump links that point outside this section.
+    A callout written after a bullet or a jump link ("- [▶ 1:02](#t=62) > [!unclear] ...") isn't
+    a callout in Markdown, so it's moved to the start of its own line."""
+    md = no_heading(md)
+    md = re.sub(r"(?m)^[ \t]*(?:[-*] +)?(\[▶ [0-9:]+\]\(#t=\d+\)):?[ \t]*> (\[![a-z]+\])", r"> \2 \1", md)
+
+    def fix(m):
+        t = int(m[2])
+        return m[0] if start - margin <= t <= end + margin else f"({m[1]})"
+    return re.sub(r"\[▶ ([0-9:]+)\]\(#t=(\d+)\)", fix, md).strip()
+
+
+STUDY_SYSTEM = """You turn a lecture's study notes into a summary, flashcards and a practice quiz.
+
+Use only what the notes say. Every card and question gets t: the time in seconds where its material is taught, taken from the nearest jump link before it in the notes ([▶ 12:34](#t=754) means t=754).
+
+summary: Markdown. One or two sentences on what the lecture covers, then 3 to 7 bullets with the key takeaways.
+
+open_questions: things the lecture left unclear or unanswered (from the [!unclear] callouts and gaps you notice), as short questions. Empty if there are none.
+
+cards: one per definition, rule, distinction, step or result worth remembering. kind "cloze": front is a sentence from the material with the key term hidden as {{c1::term}} (a second hidden part in the same card is {{c2::...}}), back is a short note of context. A hidden part must never contain "::" (Anki reads it as a hint): for a name like std::vector or a Haskell type signature, write a qa card instead. kind "qa": a direct question on the front, a short complete answer on the back. Cards should be atomic and test understanding, not trivia. No cards about course logistics. Typically 10 to 30 for a full lecture, fewer for a short one.
+
+quiz: 10 to 15 questions for a full lecture (4 to 6 if the recording is under 20 minutes), mixing kind "mcq" (exactly 4 choices, answer is the exact text of the right choice, distractors are plausible mistakes a student would make) and kind "short" (answer is a model answer of one to three sentences). explanation says why the answer is right, and for mcq why the most tempting wrong choice is wrong. Favour questions that apply the material (trace this grammar, which derivation, what does this code print) over recall.
+
+Keep code and grammar formatting (```), and KaTeX math ($...$), as in the notes."""
+
+STUDY_SCHEMA = {
+    "type": "object", "required": ["summary", "open_questions", "cards", "quiz"],
+    "properties": {
+        "summary": {"type": "string"},
+        "open_questions": {"type": "array", "items": {"type": "string"}},
+        "cards": {"type": "array", "items": {
+            "type": "object", "required": ["kind", "front", "back", "t"],
+            "properties": {"kind": {"type": "string", "enum": ["cloze", "qa"]}, "front": {"type": "string"},
+                           "back": {"type": "string"}, "t": {"type": "number"}}}},
+        "quiz": {"type": "array", "items": {
+            "type": "object", "required": ["kind", "question", "choices", "answer", "explanation", "t"],
+            "properties": {"kind": {"type": "string", "enum": ["mcq", "short"]}, "question": {"type": "string"},
+                           "choices": {"type": "array", "items": {"type": "string"}}, "answer": {"type": "string"},
+                           "explanation": {"type": "string"}, "t": {"type": "number"}}}}}}
+
+CHECK_SYSTEM = """You fact-check a lecture's study notes, flashcards and quiz against the lecture itself: its full transcript and its slides. The student will study from these instead of rewatching, so anything the lecture didn't say is a problem.
+
+For each claim, example, definition, card and quiz answer: is it supported by the transcript or the slides? The transcript is automatic speech recognition, so a correctly fixed mishearing of a technical term counts as supported.
+- Not supported, or contradicted: remove it. If removing it leaves a section that no longer reads well, repair the wording around the gap, without adding new material.
+- Probably right but you can't confirm it (the audio is garbled there, or it depends on a slide you can't see): keep it, and put a callout right after it: > [!check] what to verify.
+- Supported: leave it exactly as it is. Don't rewrite for style, don't reorder, don't add anything, and keep every jump link [▶ m:ss](#t=N), slide citation, code block and math as they are.
+
+Return:
+- edits: every change to a section, as an exact find-and-replace: the section's number, find (text copied character for character from that section, long enough to occur only once in it, usually the whole sentence or bullet) and replace (the new text, or "" to remove it). To flag something, replace it with itself followed by the callout. Never return a whole section.
+- summary: the new summary if you changed it, otherwise null.
+- drop_cards and drop_quiz: the numbers of cards and quiz questions that are wrong or unsupported. A quiz question whose stated answer is wrong is dropped, not fixed.
+- issues: one entry per change: where ("section 3", "card 12", "quiz 4", "summary"), verdict ("removed" or "flagged"), the claim, and the reason."""
+
+CHECK_SCHEMA = {
+    "type": "object", "required": ["edits", "summary", "drop_cards", "drop_quiz", "issues"],
+    "properties": {
+        "edits": {"type": "array", "items": {"type": "object", "required": ["number", "find", "replace"],
+                                              "properties": {"number": {"type": "integer"}, "find": {"type": "string"},
+                                                             "replace": {"type": "string"}}}},
+        "summary": {"type": ["string", "null"]},
+        "drop_cards": {"type": "array", "items": {"type": "integer"}},
+        "drop_quiz": {"type": "array", "items": {"type": "integer"}},
+        "issues": {"type": "array", "items": {"type": "object", "required": ["where", "verdict", "claim", "reason"],
+                                               "properties": {"where": {"type": "string"},
+                                                              "verdict": {"type": "string", "enum": ["removed", "flagged"]},
+                                                              "claim": {"type": "string"},
+                                                              "reason": {"type": "string"}}}}}}
+
+
+def _numbered(items: list[dict], fmt) -> str:
+    return "\n".join(f"{n}. {fmt(x)}" for n, x in enumerate(items, 1))
+
+
+def _card_line(c: dict) -> str:
+    return f"[{c['kind']}] {c['front']} || {c['back']} (t={int(c['t'])})"
+
+
+def _quiz_line(q: dict) -> str:
+    ch = "".join(f"\n   - {x}" for x in q.get("choices") or [])
+    return f"[{q['kind']}] {q['question']}{ch}\n   Answer: {q['answer']}\n   Why: {q['explanation']}"
+
+
+def notes_markdown(sections: list[dict]) -> str:
+    return "\n\n".join(f"## {s['title']}\n\n{jump(s['start'])}"
+                       + (f" (Slides {s['slides'][0]} to {s['slides'][-1]})" if len(s["slides"]) > 1
+                          else f" (Slide {s['slides'][0]})" if s["slides"] else "")
+                       + f"\n\n{s['markdown']}" for s in sections if s.get("markdown"))
+
+
+def generate_notes(lecture_id: int, say=lambda m: None) -> dict:
+    """Outline, then each section from its transcript slice and slides, then summary, cards and
+    quiz, then an Opus check against the transcript. Every call is cached, so a re-run after a
+    failure (or the usage limit) picks up where it stopped."""
+    inp = notes_inputs(lecture_id)
+    if not inp["segs"]:
+        raise ClaudeError("There's no transcript to write notes from yet.")
+    titles = {n: (s["title"] or "") for n, s in inp["slides"].items()}
+    full = transcript_text(inp["segs"], titles)
+    say("outlining")
+    slides = _slide_block(inp, inp["slides"])
+    out = claude_call(_header(inp) + (f"\nSlides:\n{slides}\n" if slides else "\nThis lecture has no slides.\n")
+                      + f"\nTranscript:\n{full}", system=OUTLINE_SYSTEM, schema=OUTLINE_SCHEMA,
+                      lecture_id=lecture_id, kind="outline")
+    outline = clean_outline(out["sections"], inp["duration"])
+    todo = [i for i, s in enumerate(outline) if s["kind"] != "off-topic"]
+    for n, i in enumerate(todo, 1):
+        say(f"writing section {n} of {len(todo)}")
+        system = LOGISTICS_SYSTEM if outline[i]["kind"] == "logistics" else SECTION_SYSTEM
+        md = claude_call(_section_prompt(inp, outline, i), system=system, lecture_id=lecture_id, kind="section")
+        md = tidy_section(md, outline[i]["start"], outline[i]["end"])
+        outline[i]["markdown"] = "" if md.strip("() \n").lower() == "nothing to note" else md
+    sections = [s for s in outline if s.get("markdown")]
+    if not sections:
+        raise ClaudeError("Nothing in this recording was teaching, so there are no notes to write.")
+    say("writing the summary, flashcards and quiz")
+    body = notes_markdown(sections)
+    study = claude_call(_header(inp) + f"\nNotes:\n{body}", system=STUDY_SYSTEM, schema=STUDY_SCHEMA,
+                        lecture_id=lecture_id, kind="study")
+    cards = [c for c in study["cards"] if c["front"].strip() and c["back"].strip()]
+    quiz = [q for q in study["quiz"] if q["question"].strip() and
+            (q["kind"] != "mcq" or (len(q["choices"]) >= 2 and q["answer"] in q["choices"]))]
+    summary = no_heading(study["summary"])
+    say("checking the notes against the transcript")
+    numbered = "\n\n".join(f"=== Section {n}: {s['title']} ===\n{s['markdown']}" for n, s in enumerate(sections, 1))
+    check = claude_call(
+        _header(inp) + (f"\nSlides:\n{slides}\n" if slides else "\nThis lecture has no slides.\n")
+        + f"\nFull transcript:\n{full}\n\n### The notes to check\n\nSummary:\n{summary}\n\n{numbered}"
+        + f"\n\nFlashcards (front || back):\n{_numbered(cards, _card_line)}"
+        + f"\n\nQuiz:\n{_numbered(quiz, _quiz_line)}",
+        system=CHECK_SYSTEM, model=CHECK_MODEL, schema=CHECK_SCHEMA, lecture_id=lecture_id, kind="check")
+    issues = list(check["issues"])
+    for n, s in apply_check_edits(sections, check["edits"]):
+        issues.append({"where": f"section {n}", "verdict": "flagged", "claim": s[:300],
+                       "reason": "The check wanted to change this but its edit didn't match the notes, so it "
+                                 "wasn't applied. Verify it against the recording."})
+    new = no_heading(check.get("summary") or "")
+    if new and len(new) >= 0.4 * len(summary):  # a summary cut to a stub is a bad answer, not a correction
+        summary = new
+    cards = [c for n, c in enumerate(cards, 1) if n not in set(check["drop_cards"])]
+    quiz = [q for n, q in enumerate(quiz, 1) if n not in set(check["drop_quiz"])]
+    return {"outline": outline, "sections": sections, "summary": summary,
+            "open_questions": [q.strip() for q in study["open_questions"] if q.strip()],
+            "cards": cards, "quiz": quiz, "issues": issues,
+            "removed": sum(i["verdict"] == "removed" for i in issues),
+            "flagged": sum(i["verdict"] == "flagged" for i in issues)}
+
+
+def apply_check_edits(sections: list[dict], edits: list[dict]) -> list[tuple[int, str]]:
+    """Apply the check's find-and-replace edits in place. An edit whose text isn't in its section
+    exactly once, or that would cut most of the section, is skipped (returned), so a confused
+    check can never wipe out a section."""
+    skipped, touched = [], set()
+    for e in edits:
+        n, find = e["number"], e["find"]
+        if not (1 <= n <= len(sections)) or not find.strip():
+            continue
+        s = sections[n - 1]
+        after = len(s["markdown"]) - len(find) + len(e["replace"])
+        if s["markdown"].count(find) != 1 or after < 0.4 * len(s["markdown"]):
+            skipped.append((n, find))
+            continue
+        s["markdown"] = s["markdown"].replace(find, e["replace"], 1)
+        touched.add(n)
+    for n in touched:
+        s = sections[n - 1]
+        s["markdown"] = tidy_section(re.sub(r"\n{3,}", "\n\n", s["markdown"]), s["start"], s["end"])
+    return skipped
+
+
+CLOZE_RE = re.compile(r"\{\{c\d+::(.*?)\}\}", re.S)  # Anki's is multi-line too
+
+
+def fix_card(c: dict) -> dict:
+    """Anki reads {{c1::answer::hint}}, so a cloze whose answer holds "::" (std::vector, a Haskell
+    type) would show part of the answer as a hint. That card becomes a question and answer."""
+    hidden = CLOZE_RE.findall(c["front"])
+    if c["kind"] != "cloze" or not any("::" in h for h in hidden):
+        return c
+    back = "; ".join(f"`{h}`" if "::" in h and "`" not in h else h for h in hidden)
+    return {**c, "kind": "qa", "front": "Fill in the blank: " + CLOZE_RE.sub("____", c["front"]),
+            "back": back + ("\n\n" + c["back"].strip() if c["back"].strip() else "")}
+
+
+def _card_key(front: str) -> str:
+    return re.sub(r"\W+", " ", front).strip().lower()
+
+
+def save_notes(lecture_id: int, notes: dict, generator: str) -> None:
+    """Store the notes, keeping your review progress on any card whose front didn't change."""
+    lec = get_lecture(lecture_id)
+    dur = notes_inputs(lecture_id)["duration"]
+    with db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        old = {_card_key(r["front"]): dict(r) for r in con.execute(
+            "SELECT front, box, due, reviews, lapses, last_reviewed FROM cards WHERE lecture_id=?", (lecture_id,))}
+        con.execute("DELETE FROM cards WHERE lecture_id=?", (lecture_id,))
+        con.execute("DELETE FROM quiz WHERE lecture_id=?", (lecture_id,))
+        for c in map(fix_card, notes["cards"]):
+            p = old.get(_card_key(c["front"]), {})
+            con.execute("INSERT INTO cards(lecture_id, kind, front, back, t, box, due, reviews, lapses, last_reviewed) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (lecture_id, c["kind"], c["front"].strip(), c["back"].strip(), min(max(0, c["t"]), dur),
+                         p.get("box", 1), p.get("due"), p.get("reviews", 0), p.get("lapses", 0), p.get("last_reviewed")))
+        for i, q in enumerate(notes["quiz"]):
+            con.execute("INSERT INTO quiz(lecture_id, idx, kind, question, choices, answer, explanation, t) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (lecture_id, i, q["kind"], q["question"].strip(), json.dumps(q.get("choices") or []),
+                         q["answer"].strip(), q["explanation"].strip(), min(max(0, q["t"]), dur)))
+        # an upsert, not a replace: export_paths survives, so a renamed lecture's old files get cleaned up
+        con.execute("""INSERT INTO notes(lecture_id, outline, sections, summary, open_questions, issues,
+                       removed, flagged, generator, transcript_source, deck_id, slides_aligned_at, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                       ON CONFLICT(lecture_id) DO UPDATE SET outline=excluded.outline, sections=excluded.sections,
+                       summary=excluded.summary, open_questions=excluded.open_questions, issues=excluded.issues,
+                       removed=excluded.removed, flagged=excluded.flagged, generator=excluded.generator,
+                       transcript_source=excluded.transcript_source, deck_id=excluded.deck_id,
+                       slides_aligned_at=excluded.slides_aligned_at, created_at=excluded.created_at""",
+                    (lecture_id, json.dumps(notes["outline"]), json.dumps(notes["sections"]), notes["summary"],
+                     json.dumps(notes["open_questions"]), json.dumps(notes["issues"]), notes["removed"],
+                     notes["flagged"], generator, lec["transcript_source"], lec["deck_id"], lec["slides_aligned_at"]))
+        con.execute("UPDATE lectures SET notes_error=NULL, updated_at=datetime('now'), status=CASE WHEN status "
+                    "IN ('queued_transcribe','transcribing','duplicate') THEN status ELSE 'notes_done' END WHERE id=?", (lecture_id,))
+    try:  # the notes are safe in the database: search catches up later, and the next sync exports them
+        index_lecture(lecture_id)
+        export_lecture(lecture_id)
+    except Exception:
+        log.exception("indexing or exporting lecture %s failed", lecture_id)
+
+
+def enqueue_notes(lecture_id: int, mode: str = "claude", force: bool = False) -> int:
+    """Queue notes for a lecture unless they're already queued (returns that job then)."""
+    with db() as con:
+        gen = (con.execute("SELECT generator FROM notes WHERE lecture_id=?", (lecture_id,)).fetchone() or [None])[0]
+        if mode == "offline" and gen == "claude" and not force:
+            raise ValueError("This lecture already has notes from Claude. Offline notes would replace them "
+                             "and their flashcards; ask again with force to do it anyway.")
+        if q := con.execute("SELECT id FROM jobs WHERE kind='notes' AND lecture_id=? AND status='queued'",
+                            (lecture_id,)).fetchone():
+            return q[0]
+        title = (con.execute("SELECT title FROM lectures WHERE id=?", (lecture_id,)).fetchone() or [""])[0]
+        con.execute("UPDATE lectures SET status='notes_queued', notes_error=NULL WHERE id=? AND status NOT IN "
+                    "('notes_running','queued_transcribe','transcribing','duplicate')", (lecture_id,))
+    jid = enqueue("notes", {"lecture_id": lecture_id, "title": title, "mode": mode}, lecture_id=lecture_id)
+    wake_workers()
+    return jid
+
+
+AUTO_NOTES = os.environ.get("LECTURELAB_AUTO_NOTES", "on") != "off"
+
+
+def notes_after_slides(lecture_id: int) -> None:
+    """Once a lecture's slides are settled (lined up, none, or failed), write its notes if it has
+    none yet. A lecture whose deck is still downloading, or whose course hasn't been scanned for
+    decks yet, waits: notes written now would miss the slides."""
+    if not AUTO_NOTES:
+        return
+    with db() as con:
+        busy = con.execute("SELECT 1 FROM jobs WHERE kind='notes' AND lecture_id=? AND status IN ('queued','running')",
+                           (lecture_id,)).fetchone()
+        have = con.execute("SELECT 1 FROM notes WHERE lecture_id=?", (lecture_id,)).fetchone()
+        segs = con.execute("SELECT 1 FROM segments WHERE lecture_id=? LIMIT 1", (lecture_id,)).fetchone()
+    if segs and not busy and not have:
+        enqueue_notes(lecture_id)
+
+
+def job_notes(job: dict) -> dict:
+    """payload: {lecture_id, mode: claude|offline}."""
+    lid = job["payload"]["lecture_id"]
+    say = lambda m: job_update(job["id"], progress=m)  # noqa: E731
+    if not get_lecture(lid):
+        return {"skipped": "lecture deleted"}
+    mode = job["payload"].get("mode", "claude")
+    with db() as con:
+        con.execute("UPDATE lectures SET status='notes_running', notes_error=NULL WHERE id=? "
+                    "AND status NOT IN ('queued_transcribe','transcribing','duplicate')", (lid,))
+    try:
+        notes = offline_notes(lid) if mode == "offline" else generate_notes(lid, say)
+        save_notes(lid, notes, mode)
+    except QuotaExceeded as e:  # the usage limit, or Claude Code signed out: try again later
+        with db() as con:
+            con.execute("UPDATE lectures SET status=? WHERE id=? AND status='notes_running'",
+                        ("transcribed" if isinstance(e, ClaudeUnavailable) else "waiting_quota", lid))
+        wait = max(60, int(e.reset_at - time.time()))
+        job_update(job["id"], status="queued", retry_at=_sqlnow(wait), owner_pid=None, attempts=0, progress=str(e))
+        raise RetryLater(str(e)) from e
+    except Exception as e:
+        with db() as con:
+            con.execute("UPDATE lectures SET notes_error=?, status=CASE status WHEN 'notes_running' THEN "
+                        "'transcribed' ELSE status END WHERE id=?", (user_error(e, "Writing the notes"), lid))
+        raise
+    return {"sections": len(notes["sections"]), "cards": len(notes["cards"]), "quiz": len(notes["quiz"]),
+            "removed": notes["removed"], "flagged": notes["flagged"], "mode": mode}
+
+
+def job_slides_then_notes(job: dict) -> dict:
+    """The slides job, then notes once the slides are settled either way."""
+    lid = job["payload"]["lecture_id"]
+    try:
+        res = job_slides(job)
+    except Exception:
+        notes_after_slides(lid)  # notes without slides beat no notes; regenerate once they're fixed
+        raise
+    if "segments" in res:  # newly lined up: slides are searchable at the time they were shown
+        index_lecture(lid)
+    wait = res.get("waiting")
+    # "no slides": no deck and no video to read. Settled, unless the course's scan may still find one.
+    if not wait or (wait == "no slides" and slides_scan_done((get_lecture(lid) or {}).get("course_id"))):
+        notes_after_slides(lid)
+    return res
+
+
+JOB_HANDLERS["notes"] = job_notes
+JOB_HANDLERS["slides"] = job_slides_then_notes
+
+
+def stale_reason(n, lec: dict) -> str | None:
+    if n["transcript_source"] != lec["transcript_source"]:
+        return "The lecture was transcribed again after these notes were written."
+    if n["deck_id"] != lec["deck_id"]:
+        return "These notes were written with other slides, or before any slides were found."
+    if n["slides_aligned_at"] != lec["slides_aligned_at"]:
+        return "The slides were lined up again after these notes were written."
+    return None
+
+
+def lecture_notes(lecture_id: int) -> dict:
+    lec = get_lecture(lecture_id)
+    if not lec:
+        raise KeyError(lecture_id)
+    with db() as con:
+        n = con.execute("SELECT * FROM notes WHERE lecture_id=?", (lecture_id,)).fetchone()
+        job = con.execute("SELECT status, progress, retry_at FROM jobs WHERE kind='notes' AND lecture_id=? AND "
+                          "status IN ('queued','running') ORDER BY status='running' DESC, id LIMIT 1",
+                          (lecture_id,)).fetchone()
+        counts = con.execute("SELECT (SELECT COUNT(*) FROM cards WHERE lecture_id=?), "
+                             "(SELECT COUNT(*) FROM quiz WHERE lecture_id=?)", (lecture_id, lecture_id)).fetchone()
+    if job and job["status"] == "running":
+        state = "writing"
+    elif lec["status"] == "waiting_quota":
+        state = "waiting_quota"
+    elif job:
+        state = "queued"
+    elif lec["notes_error"]:
+        state = "error"
+    elif n:
+        state = "done"
+    else:
+        state = "none"
+    out = {"state": state, "progress": job and job["progress"], "error": lec["notes_error"],
+           "retry_at": job and job["retry_at"]}
+    if n:
+        out.update({
+            "summary": n["summary"], "sections": json.loads(n["sections"]),
+            "open_questions": json.loads(n["open_questions"]), "issues": json.loads(n["issues"]),
+            "removed": n["removed"], "flagged": n["flagged"], "generator": n["generator"],
+            "created_at": n["created_at"], "cards": counts[0], "quiz": counts[1],
+            # written from an older transcript or other slides: worth regenerating
+            "stale": stale_reason(n, lec) is not None, "stale_reason": stale_reason(n, lec)})
+    return out
+
+
+# ---------------------------------------------------------------- study: review, quiz, Anki, search
+
+LEITNER_DAYS = [1, 2, 4, 8, 16]  # box n comes back after LEITNER_DAYS[n-1] days
+
+
+def _today(offset: int = 0) -> str:
+    return Date.fromordinal(Date.today().toordinal() + offset).isoformat()
+
+
+def due_cards(course_id: int | None = None, lecture_id: int | None = None, limit: int = 100) -> dict:
+    """Cards due today or new, oldest due first, plus counts per Leitner box. due is a local date
+    (YYYY-MM-DD); a new card has none and isn't in a box until you first answer it."""
+    where, args = ["1=1"], []
+    if lecture_id:
+        where.append("k.lecture_id=?")
+        args.append(lecture_id)
+    if course_id:
+        where.append("l.course_id=?")
+        args.append(course_id)
+    w = " AND ".join(where)
+    with db() as con:
+        due = rows(con.execute(
+            f"""SELECT k.id, k.lecture_id, k.kind, k.front, k.back, k.t, k.box, k.due, k.reviews, k.lapses,
+                       l.title AS lecture_title, l.date AS lecture_date, c.code AS course_code
+                FROM cards k JOIN lectures l ON l.id=k.lecture_id LEFT JOIN courses c ON c.id=l.course_id
+                WHERE {w} AND (k.due IS NULL OR k.due<=?)
+                ORDER BY k.due IS NULL, k.due, k.box, k.id LIMIT ?""", (*args, _today(), limit)))
+        boxes = dict(con.execute(f"SELECT k.box, COUNT(*) FROM cards k JOIN lectures l ON l.id=k.lecture_id "
+                                 f"WHERE {w} AND k.due IS NOT NULL GROUP BY k.box", args).fetchall())
+        counts = con.execute(f"""SELECT COUNT(*), SUM(k.due IS NULL), SUM(k.due IS NOT NULL AND k.due<=?)
+                                 FROM cards k JOIN lectures l ON l.id=k.lecture_id WHERE {w}""",
+                             (_today(), *args)).fetchone()
+    return {"cards": due, "total": counts[0], "new": counts[1] or 0, "due": counts[2] or 0,
+            "boxes": [boxes.get(b, 0) for b in range(1, 6)]}
+
+
+def review_card(card_id: int, correct: bool) -> dict:
+    """Leitner: right moves the card up a box and pushes it out (1, 2, 4, 8, 16 days); wrong sends
+    it back to box 1 for tomorrow. Returns the card as it was too, so the UI can undo."""
+    with db() as con:
+        r = con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+        if not r:
+            raise KeyError(card_id)
+        before = dict(r)
+        box = min(5, before["box"] + 1) if correct else 1
+        due = _today(LEITNER_DAYS[box - 1])
+        con.execute("UPDATE cards SET box=?, due=?, reviews=reviews+1, lapses=lapses+?, last_reviewed=datetime('now') "
+                    "WHERE id=?", (box, due, 0 if correct else 1, card_id))
+        after = dict(con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone())
+    return {"card": after, "before": {k: before[k] for k in ("box", "due", "reviews", "lapses", "last_reviewed")}}
+
+
+def undo_review(card_id: int, before: dict) -> dict:
+    if not {"box", "reviews", "lapses"} <= before.keys():
+        raise ValueError("before needs box, reviews and lapses")
+    if not 1 <= int(before["box"]) <= len(LEITNER_DAYS) or not re.fullmatch(r"(\d{4}-\d\d-\d\d)?",
+                                                                              before.get("due") or ""):
+        raise ValueError("before has a box outside 1 to 5 or a due date that isn't YYYY-MM-DD")
+    with db() as con:
+        n = con.execute("UPDATE cards SET box=?, due=?, reviews=?, lapses=?, last_reviewed=? WHERE id=?",
+                        (int(before["box"]), before.get("due"), int(before["reviews"]), int(before["lapses"]),
+                         before.get("last_reviewed"), card_id)).rowcount
+        if not n:
+            raise KeyError(card_id)
+        return dict(con.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone())
+
+
+def lecture_quiz(lecture_id: int) -> dict:
+    with db() as con:
+        qs = rows(con.execute("SELECT id, idx, kind, question, choices, t FROM quiz WHERE lecture_id=? ORDER BY idx",
+                              (lecture_id,)))
+        last = con.execute("SELECT score, total, at FROM quiz_attempts WHERE lecture_id=? ORDER BY id DESC LIMIT 1",
+                           (lecture_id,)).fetchone()
+    for q in qs:
+        q["choices"] = json.loads(q["choices"])
+    return {"questions": qs, "last_attempt": dict(last) if last else None}
+
+
+def _norm_answer(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def grade_quiz(lecture_id: int, answers: list[dict], check: bool = False) -> dict:
+    """answers: [{id, answer, correct?}]. Multiple choice is marked here; for a short answer you
+    compare yours with the model answer and say whether you got it (correct). check: mark and show
+    the model answers without saving an attempt (an unmarked short answer comes back correct None);
+    otherwise the attempt is saved, and an unmarked short answer counts as wrong."""
+    with db() as con:
+        qs = {r["id"]: dict(r) for r in con.execute("SELECT * FROM quiz WHERE lecture_id=?", (lecture_id,))}
+        given = {int(a["id"]): a for a in answers if int(a.get("id", -1)) in qs}
+        results = []
+        for qid, q in sorted(qs.items(), key=lambda kv: kv[1]["idx"]):
+            a = given.get(qid, {})
+            ok = (_norm_answer(a.get("answer")) == _norm_answer(q["answer"])) if q["kind"] == "mcq" \
+                else None if check and a.get("correct") is None else bool(a.get("correct"))
+            results.append({"id": qid, "kind": q["kind"], "your_answer": a.get("answer"), "correct": ok,
+                            "answer": q["answer"], "explanation": q["explanation"], "t": q["t"]})
+        score = sum(r["correct"] is True for r in results)
+        unmarked = sum(r["correct"] is None for r in results)
+        if check:
+            return {"results": results, "score": score, "total": len(results), "unmarked": unmarked, "saved": False}
+        con.execute("INSERT INTO quiz_attempts(lecture_id, answers, score, total) VALUES (?,?,?,?)",
+                    (lecture_id, json.dumps({r["id"]: {"answer": r["your_answer"], "correct": r["correct"]}
+                                             for r in results}), score, len(results)))
+    return {"results": results, "score": score, "total": len(results), "unmarked": 0, "saved": True}
+
+
+def lecture_link(lecture_id: int, t: float | None = None) -> str:
+    """A link into LectureLab at a moment. ?t= goes before the hash: the hash is the UI's router."""
+    return f"http://127.0.0.1:{PORT}/" + (f"?t={int(t)}" if t is not None else "") + f"#/lecture/{lecture_id}"
+
+
+def _anki_html(s: str) -> str:
+    import html
+    return html.escape(s or "").replace("\t", "    ").replace("\n", "<br>")
+
+
+def anki_tsv(course_id: int | None = None, lecture_id: int | None = None) -> str:
+    """Anki's text import: Cloze and Basic notes in one file, one deck per lecture. The GUID column
+    makes a re-import update the same notes instead of duplicating them."""
+    where, args = ["1=1"], []
+    if lecture_id:
+        where.append("k.lecture_id=?")
+        args.append(lecture_id)
+    if course_id:
+        where.append("l.course_id=?")
+        args.append(course_id)
+    with db() as con:
+        cards = rows(con.execute(
+            f"""SELECT k.*, l.title, l.date, c.code FROM cards k JOIN lectures l ON l.id=k.lecture_id
+                LEFT JOIN courses c ON c.id=l.course_id WHERE {' AND '.join(where)}
+                ORDER BY l.date, l.id, k.id""", args))
+    out = ["#separator:tab", "#html:true", "#guid column:1", "#notetype column:2", "#deck column:3",
+           "#tags column:6"]
+    for k in cards:
+        deck = "::".join(x.replace("::", ":") for x in ["LectureLab", k["code"] or "Unsorted",
+                                                         f"{k['date'] or ''} {k['title']}".strip()])
+        guid = "ll" + hashlib.sha1(f"{k['lecture_id']}:{_card_key(k['front'])}".encode()).hexdigest()[:16]
+        back = _anki_html(k["back"])
+        if k["t"] is not None:
+            back += f'<br><a href="{lecture_link(k["lecture_id"], k["t"])}">▶ {fmt_t(k["t"])}</a>'
+        tags = " ".join(filter(None, [re.sub(r"\s+", "_", k["code"] or ""), f"lecture{k['lecture_id']}"]))
+        deck = re.sub(r"[\t\r\n]+", " ", deck)  # Anki reads the deck column as plain text
+        out.append("\t".join([guid, "Cloze" if k["kind"] == "cloze" else "Basic", deck,
+                              _anki_html(k["front"]), back, tags]))
+    return "\n".join(out) + "\n"
+
+
+# Full-text search over transcripts, notes and slides. Rebuilt per lecture whenever one changes.
+
+def index_lecture(lecture_id: int) -> int:
+    with db() as con:
+        segs = rows(con.execute("SELECT start, end, text, slide_no FROM segments WHERE lecture_id=? ORDER BY idx",
+                                (lecture_id,)))
+        lec = con.execute("SELECT deck_id FROM lectures WHERE id=?", (lecture_id,)).fetchone()
+        slides = rows(con.execute("SELECT no, title, text FROM slides WHERE deck_id=?",
+                                  ((lec and lec[0]) or -1,)))
+        n = con.execute("SELECT sections, summary FROM notes WHERE lecture_id=?", (lecture_id,)).fetchone()
+    docs: list[tuple[str, str, float]] = []
+    chunk = None
+    for s in segs:  # ~30 s windows: Whisper's segments can be one word, too short to match a phrase
+        if chunk and s["start"] - chunk[1] > 30:
+            docs.append(("transcript", chunk[0], chunk[1]))
+            chunk = None
+        chunk = (chunk[0] + " " + s["text"], chunk[1]) if chunk else (s["text"], s["start"])
+    if chunk:
+        docs.append(("transcript", chunk[0], chunk[1]))
+    first = {}
+    for s in segs:
+        if s["slide_no"] and s["slide_no"] not in first:
+            first[s["slide_no"]] = s["start"]
+    for sl in slides:
+        text = f"{sl['title'] or ''}\n{sl['text'] or ''}".strip()
+        if text:
+            docs.append(("slide", f"Slide {sl['no']}: {text}", first.get(sl["no"])))
+    if n:
+        docs.append(("notes", n["summary"], 0.0))
+        for sec in json.loads(n["sections"]):
+            t = sec["start"]
+            for para in re.split(r"\n\s*\n", sec.get("markdown") or ""):
+                if m := re.search(r"\(#t=(\d+)\)", para):
+                    t = float(m[1])
+                if para.strip():
+                    docs.append(("notes", f"{sec['title']}: {para.strip()}", t))
+    with db() as con:
+        con.execute("DELETE FROM search WHERE lecture_id=?", (lecture_id,))
+        con.executemany("INSERT INTO search(text, kind, lecture_id, t) VALUES (?,?,?,?)",
+                        [(text, kind, lecture_id, t) for kind, text, t in docs])
+    return len(docs)
+
+
+def index_missing() -> int:
+    """Index lectures that have a transcript but nothing in the search index (first start after
+    Stage 4, or an index lost to a crash)."""
+    with db() as con:
+        ids = [r[0] for r in con.execute(
+            "SELECT DISTINCT lecture_id FROM segments WHERE lecture_id NOT IN "
+            "(SELECT DISTINCT CAST(lecture_id AS INTEGER) FROM search)")]
+    for lid in ids:
+        index_lecture(lid)
+    return len(ids)
+
+
+def search(q: str, course_id: int | None = None, limit: int = 50) -> list[dict]:
+    """Every word must match (stemmed, so 'parsing' finds 'parser'); the last one as a prefix, so
+    results come while you type. Snippets mark the hits with <mark>, everything else escaped."""
+    import html
+    words = re.findall(r"\w+", q or "")
+    if not words:
+        return []
+    match = " ".join(f'"{w}"' for w in words[:-1]) + f' "{words[-1]}"*'
+    sql = """SELECT s.lecture_id, s.kind, s.t, snippet(search, 0, char(2), char(3), '…', 14) AS snip,
+                    l.title, l.date, c.code
+             FROM search s JOIN lectures l ON l.id=CAST(s.lecture_id AS INTEGER)
+             LEFT JOIN courses c ON c.id=l.course_id
+             WHERE search MATCH ?""" + (" AND l.course_id=?" if course_id else "") + " ORDER BY bm25(search) LIMIT ?"
+    with db() as con:
+        found = rows(con.execute(sql, (match, *([course_id] if course_id else []), limit)))
+    for f in found:
+        f["lecture_id"] = int(f["lecture_id"])
+        f["snippet_html"] = html.escape(f.pop("snip")).replace("\x02", "<mark>").replace("\x03", "</mark>")
+    return found
+
+
+# The offline generator: no Claude at all, only when you ask for it. Extractive, so it can't make
+# anything up, but it can't explain anything either.
+
+def _timed_sentences(segs: list[dict]) -> list[tuple[str, float]]:
+    """Sentences of six words or more across segment boundaries, each with the start time of the
+    segment it begins in."""
+    import bisect
+    text, offs = "", []
+    for s in segs:
+        offs.append(len(text))
+        text += s["text"].strip() + " "
+    out = []
+    for m in re.finditer(r"[^.?!]+[.?!]?", text):
+        sent = m[0].strip()
+        if len(sent.split()) >= 6:
+            out.append((sent, segs[bisect.bisect_right(offs, m.start() + len(m[0]) - len(m[0].lstrip())) - 1]["start"]))
+    return out
+
+
+def offline_notes(lecture_id: int) -> dict:
+    """Sections per slide change (or every 5 minutes without slides), each with its most telling
+    sentences by TF-IDF; cloze cards on the course vocabulary; multiple choice with other
+    vocabulary terms as the wrong answers."""
+    import math
+    import random
+    from collections import Counter
+    inp = notes_inputs(lecture_id)
+    if not inp["segs"]:
+        raise ClaudeError("There's no transcript to write notes from yet.")
+    titles = {n: (s["title"] or "") for n, s in inp["slides"].items()}
+    groups: list[dict] = []
+    has_slides = any(x["slide_no"] for x in inp["segs"])
+    for s in inp["segs"]:
+        key = s["slide_no"] if has_slides else int(s["start"] // 300)
+        if not groups or groups[-1]["key"] != key and s["start"] - groups[-1]["start"] >= 60:
+            groups.append({"key": key, "start": s["start"], "segs": []})
+        groups[-1]["segs"].append(s)
+    tok = lambda t: re.findall(r"[a-z]{3,}", t.lower())  # noqa: E731
+    sents = [_timed_sentences(g["segs"]) for g in groups]
+    df = Counter(w for g in sents for w in {w for s, _ in g for w in tok(s)})
+    n_docs = max(1, len(groups))
+
+    def score(s: str) -> float:
+        ws = tok(s)
+        return sum(math.log(n_docs / df[w]) for w in set(ws) if df[w]) / (len(ws) ** 0.5 or 1)
+    vocab = [v.strip() for v in ((inp["course"] or {}).get("vocabulary") or "").splitlines() if v.strip()]
+    sections, cards, quiz, all_best = [], [], [], []
+    for i, g in enumerate(groups):
+        end = groups[i + 1]["start"] if i + 1 < len(groups) else inp["duration"]
+        best = sorted(sorted(sents[i], key=lambda c: -score(c[0]))[:4], key=lambda c: c[1])
+        if not best:
+            continue
+        all_best += best
+        on_slide = has_slides and g["key"] in titles
+        title = (titles[g["key"]] if on_slide else "") or f"Part {len(sections) + 1} ({fmt_t(g['start'])})"
+        slides = [g["key"]] if on_slide else []
+        sections.append({"title": title, "start": g["start"], "end": end, "kind": "content", "slides": slides,
+                         "gist": "", "markdown": "\n".join(f"- {jump(t)} {s}" for s, t in best)})
+    for s, t in all_best:
+        for term in vocab:
+            if re.search(rf"(?i)\b{re.escape(term)}\b", s) and len(cards) < 40:
+                cards.append({"kind": "cloze", "front": re.sub(rf"(?i)\b({re.escape(term)})\b", r"{{c1::\1}}", s, count=1),
+                              "back": "", "t": t})
+                others = [v for v in vocab if v.lower() != term.lower()]
+                if len(others) >= 3 and len(quiz) < 10:
+                    rnd = random.Random(f"{lecture_id}:{s}")  # same quiz every run
+                    choices = rnd.sample(others, 3) + [term]
+                    rnd.shuffle(choices)
+                    quiz.append({"kind": "mcq", "question": re.sub(rf"(?i)\b{re.escape(term)}\b", "_____", s, count=1),
+                                 "choices": choices, "answer": term, "explanation": "From the transcript.", "t": t})
+                break
+    top = sorted(sorted(all_best, key=lambda c: -score(c[0]))[:5], key=lambda c: c[1])
+    summary = "Offline notes: the lecture's most distinctive sentences, without Claude.\n\n" + \
+        "\n".join(f"- {jump(t)} {s}" for s, t in top)
+    return {"outline": sections, "sections": sections, "summary": summary, "open_questions": [],
+            "cards": cards, "quiz": quiz, "issues": [], "removed": 0, "flagged": 0}
+
+
+
+# ---------------------------------------------------------------- export and sync
+
+# Notes land where Recall already indexes: AI Notes\Lectures\<Course>\<date> - <Title>.md
+NOTES_DIR = Path(os.environ.get("LECTURELAB_NOTES_DIR", Path.home() / "Documents" / "AI Notes" / "Lectures"))
+
+
+def fmt_hms(sec: float) -> str:
+    s = int(sec)
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def _export_name(s: str) -> str:
+    # not safe_filename: "Lecture 3.1 Parsing" has no extension to keep
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s).strip(" .")[:120].strip(" .")
+
+
+def export_paths(lec: dict, taken: set[str] = frozenset()) -> tuple[Path, Path]:
+    """Where a lecture's notes and transcript go. Two lectures with the same date and title get the
+    lecture id added rather than overwrite each other ("taken": other lectures' files, lowercase)."""
+    folder = NOTES_DIR / (_export_name(lec["course_code"] or "") or "Unsorted")
+    date = lec["date"] or (lec["created_at"] or "")[:10]
+    base = _export_name(f"{date} - {lec['title']}") or f"Lecture {lec['id']}"
+    if str(folder / f"{base}.md").lower() in taken:
+        base += f" ({lec['id']})"
+    return folder / f"{base}.md", folder / f"{base} - Transcript.md"
+
+
+def _others_exports(con, lecture_id: int) -> set[str]:
+    return {p.lower() for (ep,) in con.execute("SELECT export_paths FROM notes WHERE lecture_id<>? AND "
+                                               "export_paths IS NOT NULL", (lecture_id,)) for p in json.loads(ep)}
+
+
+def _frontmatter(fields: dict) -> str:
+    # JSON strings are valid YAML, and survive titles with colons, quotes or #
+    return "---\n" + "".join(f"{k}: {json.dumps(v, ensure_ascii=False) if isinstance(v, str) else v}\n"
+                             for k, v in fields.items() if v not in (None, "")) + "---\n\n"
+
+
+def _absolute_links(md: str, lecture_id: int) -> str:
+    """[▶ 12:34](#t=754) only means something inside LectureLab: point it at the running app."""
+    return re.sub(r"\]\(#t=(\d+)\)", lambda m: f"]({lecture_link(lecture_id, int(m[1]))})", md)
+
+
+def export_lecture(lecture_id: int) -> list[Path]:
+    """Write the notes and the transcript as Markdown. Re-exporting overwrites them, and a lecture
+    renamed since the last export leaves no old copy behind (only files written here are removed)."""
+    lec = get_lecture(lecture_id)
+    if not lec:
+        return []
+    with db() as con:
+        n = con.execute("SELECT * FROM notes WHERE lecture_id=?", (lecture_id,)).fetchone()
+        segs = rows(con.execute("SELECT start, end, text, slide_no FROM segments WHERE lecture_id=? ORDER BY idx",
+                                (lecture_id,)))
+        slides = dict(con.execute("SELECT no, title FROM slides WHERE deck_id=?", (lec["deck_id"] or -1,)).fetchall())
+        others = _others_exports(con, lecture_id)
+    if not n:
+        return []
+    notes_path, tr_path = export_paths(lec, others)
+    deck = get_deck(lec["deck_id"])
+    source = next((s["url"] for s in lec["sources"] if (s["url"] or "").startswith("http")), None)
+    dur = max([lec["duration_sec"] or 0] + [s["end"] for s in segs])
+    meta = {"course": lec["course_code"], "course_name": lec["course_name"], "title": lec["title"],
+            "date": lec["date"], "source_url": source, "duration": fmt_hms(dur),
+            "slides_file": str(DATA / deck["path"]) if deck and deck.get("path") else (deck or {}).get("title"),
+            "lecturelab": lecture_link(lecture_id)}
+    sections = json.loads(n["sections"])
+    body = [f"# {lec['title']}\n", f"[Open in LectureLab]({lecture_link(lecture_id)})\n"
+            f"[Transcript](<{tr_path.name}>)\n", "## Summary\n", n["summary"].strip() + "\n",
+            _absolute_links(notes_markdown(sections), lecture_id) + "\n"]
+    if oq := json.loads(n["open_questions"]):
+        body += ["## Open questions\n", "\n".join(f"- {q}" for q in oq) + "\n"]
+    notes_md = _frontmatter({**meta, "generator": n["generator"],
+                             "checked": f"{n['removed']} removed, {n['flagged']} flagged"}) + "\n".join(body)
+    lines = transcript_text(segs, slides, clock=fmt_hms)
+    tr_md = _frontmatter({**meta, "kind": "transcript", "transcribed_by": lec["transcript_source"]}) + \
+        f"# {lec['title']}: transcript\n\n" + re.sub(r"(?m)^--- (Slide .*) ---$", r"\n**\1**\n", lines) + "\n"
+    notes_path.parent.mkdir(parents=True, exist_ok=True)
+    for path, text in ((notes_path, notes_md), (tr_path, tr_md)):
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8", errors="replace")
+            tmp.replace(path)
+        finally:  # a file open in another app: no stray .tmp left in the indexed folder
+            tmp.unlink(missing_ok=True)
+    new = [str(notes_path), str(tr_path)]
+    for old in json.loads(n["export_paths"] or "[]"):
+        if old.lower() not in {p.lower() for p in new} | others:
+            Path(old).unlink(missing_ok=True)
+    with db() as con:
+        con.execute("UPDATE notes SET exported_at=datetime('now'), export_paths=? WHERE lecture_id=?",
+                    (json.dumps(new), lecture_id))
+        con.execute("UPDATE lectures SET status='exported' WHERE id=? AND status='notes_done'", (lecture_id,))
+    return [notes_path, tr_path]
+
+
+def export_pending() -> int:
+    """Export notes that are new or changed since their last export, and lectures renamed, re-dated
+    or moved to another course since (their files would be under the old name)."""
+    with db() as con:
+        ids = [r[0] for r in con.execute("SELECT lecture_id FROM notes WHERE exported_at IS NULL "
+                                         "OR exported_at < created_at")]
+        for lid, ep in con.execute("SELECT lecture_id, export_paths FROM notes WHERE exported_at >= created_at"):
+            lec = get_lecture(lid)
+            if lec and str(export_paths(lec, _others_exports(con, lid))[0]).lower() != (json.loads(ep or '[""]') or
+                                                                                       [""])[0].lower():
+                ids.append(lid)
+    done = 0
+    for lid in ids:
+        try:
+            done += bool(export_lecture(lid))
+        except OSError as e:  # AI Notes on a drive that isn't there, a file open elsewhere: next sync
+            log.warning("export of lecture %s failed: %s", lid, e)
+    return done
+
+
+SYNC_NOTES = int(os.environ.get("LECTURELAB_SYNC_NOTES", 3))
+
+
+def queue_missing_notes(limit: int = SYNC_NOTES) -> int:
+    """Notes for transcribed lectures that have none, once their slides are settled, at most
+    `limit` at a time so a semester's backlog doesn't spend the week's plan usage in one go. A
+    lecture whose notes failed isn't retried here (it would spend usage every hour): regenerate it."""
+    with db() as con:
+        ids = [r[0] for r in con.execute(
+            """SELECT l.id FROM lectures l WHERE l.status NOT IN ('duplicate','ingesting','queued_transcribe',
+               'transcribing') AND l.notes_error IS NULL
+               AND EXISTS (SELECT 1 FROM segments s WHERE s.lecture_id=l.id)
+               AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.lecture_id=l.id)
+               AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.lecture_id=l.id AND j.kind IN ('notes','slides')
+                               AND j.status IN ('queued','running')) ORDER BY l.id""")]
+    with db() as con:
+        pending = con.execute("SELECT COUNT(*) FROM jobs WHERE kind='notes' AND status IN ('queued','running')").fetchone()[0]
+    n, limit = 0, limit - pending
+    for lid in ids:
+        if n >= limit:
+            break
+        if lecture_slides(lid)["state"] in ("aligned", "none", "error"):
+            enqueue_notes(lid)
+            n += 1
+    return n
+
+
+def server_running() -> bool:
+    import httpx
+    try:
+        r = httpx.get(f"http://127.0.0.1:{PORT}/api/health", timeout=3)
+        return r.status_code == 200 and r.json().get("pid") != os.getpid()
+    except Exception:
+        return False
+
+
+SYNC_ORDER = ["ingest", "canvas_scan", "canvas_pull", "deck_pull", "transcribe", "slides", "notes"]
+
+
+def drain_queue(say=lambda m: None, kinds: list[str] = SYNC_ORDER) -> int:
+    """Run queued jobs here until none is ready (the server isn't up to run them). A job waiting
+    out a retry time (the usage limit, Canvas signed out) is left for later."""
+    ran = 0
+    while ran < 500:  # every self-requeue sets a retry time, but don't trust that forever
+        job = next((j for k in kinds if (j := claim_job([k]))), None)
+        if not job:
+            return ran
+        say(f"job {job['id']}: {job['kind']} {job['payload'].get('title') or ''}".strip())
+        run_job(job)
+        ran += 1
+    return ran
+
+
+def run_sync(say=lambda m: None) -> dict:
+    """The whole cycle, safe to run every hour: Canvas, inbox folders, one transcription batch,
+    notes, export. Only new work is done, so a second run straight after does nothing. With the
+    server up it queues the work for the server; without it, it runs the queue itself."""
+    lock = FileLock(DATA / "sync.lock")
+    if not lock.acquire():
+        return {"skipped": "another sync is running"}
+    t0, did = time.time(), {}
+    try:
+        server = server_running()
+        if not server:  # a run killed mid-job (shutdown, the task's time limit) would block it for good
+            did["recovered"] = recover_orphans()
+        if canvas_state().get("state") == "connected":
+            say("Canvas")
+            errors = []
+            try:  # recordings for courses set to auto-pull
+                did["canvas_pulls"] = len(canvas_auto_pull())
+            except Exception as e:  # Canvas down or signed out: everything else still runs
+                errors.append(user_error(e, "The Canvas scan"))
+            for c in list_courses():  # slide decks for every other linked course, each on its own
+                # (signed out mid-way marks the state, so the rest are skipped)
+                if c["canvas_id"] and not c["auto_pull"] and canvas_state().get("state") == "connected":
+                    try:
+                        canvas_scan_course(c)
+                    except Exception as e:
+                        errors.append(user_error(e, f"The Canvas scan of {c['code']}"))
+            if errors:
+                did["canvas"] = " ".join(errors)
+        else:
+            did["canvas"] = "needs sign-in"
+        say("inbox folders")
+        # this process lives for one scan, so it can't wait for a second sighting of a file;
+        # a file still being copied is skipped either way
+        did["inbox"] = len(scan_inboxes(require_stable=False))
+        # bring this hour's recordings in first, so they make this hour's batch (with the server up,
+        # only the quick ingest jobs: its Canvas browser may be busy)
+        did["ran"] = drain_queue(say, ["ingest"] if server else ["ingest", "canvas_scan", "canvas_pull", "deck_pull"])
+        with db() as con:
+            waiting = [r[0] for r in con.execute("SELECT id FROM lectures WHERE status='queued_transcribe' "
+                                                 "AND audio_path IS NOT NULL AND transcribe_fails < 3")]
+            stuck = con.execute("SELECT COUNT(*) FROM lectures WHERE status='queued_transcribe' "
+                                "AND transcribe_fails >= 3").fetchone()[0]
+            busy = con.execute("SELECT 1 FROM jobs WHERE kind='transcribe' AND status IN ('queued','running')").fetchone()
+        if waiting and not busy:
+            enqueue("transcribe", {"mode": "auto", "lecture_ids": waiting})
+            did["transcribe"] = len(waiting)
+        did["transcribe_failing"] = stuck  # failed 3 times: only a manual Transcribe retries them
+        did["notes"] = queue_missing_notes()
+        if not server:  # with the server up, its workers pick up queued jobs within seconds
+            did["ran"] += drain_queue(say)
+            did["notes"] += queue_missing_notes()  # transcribed just now
+            did["ran"] += drain_queue(say)
+        did["exported"] = export_pending()
+        did = {k: v for k, v in did.items() if v}
+    finally:
+        lock.release()
+    log.info("sync done in %.0f s: %s", time.time() - t0, did or "nothing new")
+    return did
+
 
 
 # ---------------------------------------------------------------- v1 import
@@ -3731,6 +5119,30 @@ class TranscribeIn(BaseModel):
     mode: str = "auto"  # auto | colab | local
 
 
+class ReviewRequest(BaseModel):
+    correct: bool
+
+
+class UndoReviewRequest(BaseModel):
+    before: dict  # what POST /api/cards/{id}/review returned as "before"
+
+
+class QuizAnswer(BaseModel):
+    id: int
+    answer: str | None = None
+    correct: bool | None = None  # short answers: you say whether yours matched the model answer
+
+
+class QuizAttempt(BaseModel):
+    answers: list[QuizAnswer]
+    check: bool = False  # mark it and show the model answers, but don't save an attempt yet
+
+
+class NotesRequest(BaseModel):
+    mode: Literal["claude", "offline"] = "claude"  # offline: no Claude, only when you ask for it
+    force: bool = False  # offline over Claude's notes
+
+
 def check_ingest_fields(course_id: int | None, date: str | None) -> None:
     """Reject bad fields up front, not after a 20-minute download."""
     if course_id is not None and not find_course(course_id):
@@ -3781,6 +5193,9 @@ def start_background(watch_inboxes: bool = True) -> None:
     if ORPHAN_SWEEP_SEC > 0 and "orphans" not in WORKERS:  # 0 turns it off (the unit tests)
         WORKERS["orphans"] = threading.Thread(target=_sweep_orphans_forever, daemon=True, name="orphan-sweep")
         WORKERS["orphans"].start()
+    if "search" not in WORKERS:  # a one-off: lectures transcribed before search existed
+        WORKERS["search"] = threading.Thread(target=index_missing, daemon=True, name="search-index")
+        WORKERS["search"].start()
     if "transcribe" not in WORKERS:
         WORKERS["transcribe"] = Worker(["transcribe"], "transcribe-worker")
         WORKERS["transcribe"].start()
@@ -3792,6 +5207,8 @@ def start_background(watch_inboxes: bool = True) -> None:
         # Its own worker: a semester of queued recording pulls shouldn't hold up the slides.
         WORKERS["slides"] = Worker(["deck_pull", "slides"], "slides-worker")
         WORKERS["slides"].start()
+        WORKERS["notes"] = Worker(["notes"], "notes-worker")
+        WORKERS["notes"].start()
     if watch_inboxes and "inbox" not in WORKERS:
         WORKERS["inbox"] = InboxWatcher(interval=float(os.environ.get("LECTURELAB_INBOX_INTERVAL", 30)),
                                         on_new=wake_workers)
@@ -4076,6 +5493,77 @@ def create_app():
             retry_deck(did)
         enqueue_slides(lecture_id, ocr=True)  # you asked: read the video if no deck turns up
         return lecture_slides(lecture_id)
+
+    @app.get("/api/lectures/{lecture_id}/notes")
+    def api_lecture_notes(lecture_id: int):
+        try:
+            return lecture_notes(lecture_id)
+        except KeyError:
+            raise HTTPException(404, "lecture not found")
+
+    @app.post("/api/lectures/{lecture_id}/notes")
+    def api_write_notes(lecture_id: int, req: NotesRequest):
+        lec = get_lecture(lecture_id)
+        if not lec:
+            raise HTTPException(404, "lecture not found")
+        if not lec["segment_count"]:
+            raise HTTPException(409, "This lecture has no transcript yet, so there's nothing to write notes from.")
+        try:
+            enqueue_notes(lecture_id, req.mode, req.force)
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
+        return lecture_notes(lecture_id)
+
+    @app.get("/api/lectures/{lecture_id}/cards")
+    def api_lecture_cards(lecture_id: int):
+        if not get_lecture(lecture_id):
+            raise HTTPException(404, "lecture not found")
+        with db() as con:
+            return rows(con.execute("SELECT * FROM cards WHERE lecture_id=? ORDER BY t, id", (lecture_id,)))
+
+    @app.get("/api/review")
+    def api_review(course_id: int | None = None, lecture_id: int | None = None, limit: int = 100):
+        return due_cards(course_id, lecture_id, max(1, min(limit, 500)))
+
+    @app.post("/api/cards/{card_id}/review")
+    def api_review_card(card_id: int, req: ReviewRequest):
+        try:
+            return review_card(card_id, req.correct)
+        except KeyError:
+            raise HTTPException(404, "card not found")
+
+    @app.post("/api/cards/{card_id}/undo")
+    def api_undo_review(card_id: int, req: UndoReviewRequest):
+        try:
+            return undo_review(card_id, req.before)
+        except KeyError:
+            raise HTTPException(404, "card not found")
+        except (TypeError, ValueError):
+            raise HTTPException(422, "before must be the card state the review returned")
+
+    @app.get("/api/lectures/{lecture_id}/quiz")
+    def api_quiz(lecture_id: int):
+        if not get_lecture(lecture_id):
+            raise HTTPException(404, "lecture not found")
+        return lecture_quiz(lecture_id)
+
+    @app.post("/api/lectures/{lecture_id}/quiz")
+    def api_grade_quiz(lecture_id: int, req: QuizAttempt):
+        if not get_lecture(lecture_id):
+            raise HTTPException(404, "lecture not found")
+        return grade_quiz(lecture_id, [a.model_dump() for a in req.answers], req.check)
+
+    @app.get("/api/anki.tsv")
+    def api_anki(course_id: int | None = None, lecture_id: int | None = None):
+        name = "LectureLab" + (f"-{(find_course(course_id) or {}).get('code', course_id)}" if course_id else "") + \
+            (f"-lecture{lecture_id}" if lecture_id else "")
+        name = re.sub(r"[^\w.-]+", "_", name)
+        return PlainTextResponse(anki_tsv(course_id, lecture_id), media_type="text/tab-separated-values",
+                                 headers={"Content-Disposition": f'attachment; filename="{name}.txt"'})
+
+    @app.get("/api/search")
+    def api_search(q: str = "", course_id: int | None = None, limit: int = 50):
+        return search(q, course_id, max(1, min(limit, 200)))
 
     @app.get("/media/slides/{deck_id}/{name}")
     def api_slide_image(deck_id: int, name: str):
