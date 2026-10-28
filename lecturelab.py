@@ -5449,7 +5449,7 @@ def create_app():
         log.info("opened the LectureLab browser for Canvas sign-in")
         return {"opened": True}
 
-    @app.get("/api/canvas/courses")
+    @app.post("/api/canvas/courses")  # it links courses to Canvas ids: a write, so it gets the Origin check
     def api_canvas_courses():
         try:
             return canvas_courses()

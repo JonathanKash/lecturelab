@@ -2370,3 +2370,12 @@ def test_migration_frees_canvas_items_of_deleted_lectures(ll):
         con.execute(ll.MIGRATIONS[9])
         got = dict(con.execute("SELECT key, status FROM canvas_items").fetchall())
     assert got == {"kaltura:1_gone0000": "ignored", "kaltura:1_kept0000": "pulled"}
+
+
+def test_canvas_courses_is_a_write_other_sites_cant_trigger(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(ll, "canvas_courses", lambda: [{"canvas_id": 7}])
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    assert c.get("/api/canvas/courses").status_code == 405  # an <img src> on any page can send a GET
+    assert c.post("/api/canvas/courses", headers={"origin": "https://evil.example"}).status_code == 403
+    assert c.post("/api/canvas/courses").json() == [{"canvas_id": 7}]
