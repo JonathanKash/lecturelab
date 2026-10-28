@@ -254,6 +254,9 @@ def cmd_sync(args) -> int:
 def cmd_colab_status(args) -> int:
     """Check the Colab CLI in WSL: login, compute units, running sessions."""
     ll.setup_logging(console=False)
+    if not ll.COLAB_ENABLED:
+        print("Colab is turned off here (LECTURELAB_COLAB=off), so it wasn't checked.")
+        return 0
     try:
         print("colab:", ll.colab_bin())
         print(ll.colab("usage", timeout=120).strip())

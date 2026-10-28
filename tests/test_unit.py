@@ -2448,3 +2448,12 @@ def test_error_text_keeps_where_a_url_was_but_not_its_secrets(ll):
     assert "'https://ufl.zoom.us/rec/share/abc'" in out and out.startswith("ERROR: [kaltura] 1_abcdefgh: HTTP 403")
     assert ll.scrub_urls("see http://[::1?ks=SECRET now") == "see http://[::1 now"  # unparseable: cut at the query
     assert ll.scrub_urls("failed (http://me:pw@h.example:8080/x?pwd=1#f).") == "failed (http://h.example:8080/x)."
+
+
+def test_colab_status_leaves_colab_alone_when_it_is_off(ll, monkeypatch, capsys):
+    import cli
+    monkeypatch.setattr(ll, "COLAB_ENABLED", False)
+    monkeypatch.setattr(ll, "colab", lambda *a, **k: pytest.fail("called Colab while it was off"))
+    monkeypatch.setattr(cli, "ll", ll)
+    assert cli.main(["colab-status"]) == 0
+    assert "turned off" in capsys.readouterr().out
