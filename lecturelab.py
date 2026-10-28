@@ -1275,10 +1275,26 @@ def update_lecture(lecture_id: int, **fields) -> dict:
     if allowed.get("date") and not valid_date(allowed["date"]):
         raise ValueError("date must be a real day as YYYY-MM-DD")
     with db() as con:
-        if not con.execute("SELECT 1 FROM lectures WHERE id=?", (lecture_id,)).fetchone():
+        old = con.execute("SELECT l.course_id, l.deck_how, d.source FROM lectures l LEFT JOIN decks d ON d.id=l.deck_id "
+                          "WHERE l.id=?", (lecture_id,)).fetchone()
+        if not old:
             raise KeyError(lecture_id)
         for k, v in allowed.items():
             con.execute(f"UPDATE lectures SET {k}=?, updated_at=datetime('now') WHERE id=?", (v, lecture_id))
+        # A deck matched in the old course doesn't belong to the new one: the new course's decks get to compete.
+        # Your own pick and slides read off the video stay.
+        freed = old["deck_how"] == "auto" and old["source"] != "ocr"
+        rematch = "course_id" in allowed and allowed["course_id"] != old["course_id"] and (
+            freed or old["deck_how"] in (None, "nothing"))
+        if rematch and freed:
+            con.execute("UPDATE lectures SET deck_id=NULL, deck_how=NULL, deck_score=NULL, slides_aligned_at=NULL, "
+                        "slides_error=NULL WHERE id=?", (lecture_id,))
+            con.execute("UPDATE segments SET slide_no=NULL WHERE lecture_id=?", (lecture_id,))
+    if rematch:
+        if freed and old["course_id"]:
+            for other in match_decks(old["course_id"]):  # the freed deck may fit another lecture there
+                enqueue_slides(other)
+        enqueue_slides(lecture_id)
     return get_lecture(lecture_id)
 
 

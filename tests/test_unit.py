@@ -2379,3 +2379,26 @@ def test_canvas_courses_is_a_write_other_sites_cant_trigger(ll, monkeypatch):
     assert c.get("/api/canvas/courses").status_code == 405  # an <img src> on any page can send a GET
     assert c.post("/api/canvas/courses", headers={"origin": "https://evil.example"}).status_code == 403
     assert c.post("/api/canvas/courses").json() == [{"canvas_id": 7}]
+
+
+def test_moving_a_lecture_rematches_an_automatic_deck_only(ll):
+    a, b = ll.find_course("COP4020")["id"], ll.find_course("COP4533")["id"]
+    auto, mine, none = _lecture(ll, "transcribed"), _lecture(ll, "transcribed"), _lecture(ll, "transcribed")
+    with ll.db() as con:
+        did = con.execute("INSERT INTO decks(course_id, key, source, title, status) VALUES (?, 'upload:x', 'upload', "
+                          "'M1 Intro', 'ready')", (a,)).lastrowid
+        con.execute("UPDATE lectures SET course_id=?, deck_id=?, deck_how='auto', deck_score=0.9 WHERE id=?", (a, did, auto))
+        con.execute("UPDATE lectures SET course_id=?, deck_id=?, deck_how='manual' WHERE id=?", (a, did, mine))
+        con.execute("UPDATE lectures SET course_id=?, deck_how='nothing' WHERE id=?", (a, none))  # no slides in its video
+    ll.update_lecture(auto, title="renamed")  # no move: nothing to redo
+    assert ll.get_lecture(auto)["deck_id"] == did
+    ll.update_lecture(auto, course_id=b)
+    ll.update_lecture(mine, course_id=b)
+    ll.update_lecture(none, course_id=b)  # the new course may have a deck for it
+    moved, kept = ll.get_lecture(auto), ll.get_lecture(mine)
+    assert (moved["deck_id"], moved["deck_how"]) == (None, None)
+    assert (kept["deck_id"], kept["deck_how"]) == (did, "manual")  # your pick goes where you put it
+    with ll.db() as con:
+        queued = [r[0] for r in con.execute("SELECT lecture_id FROM jobs WHERE kind='slides' AND status='queued' "
+                                            "ORDER BY id")]
+    assert queued == [auto, none]
