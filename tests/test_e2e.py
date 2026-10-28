@@ -898,6 +898,65 @@ def test_waiting_jobs_stay_open_while_jobs_poll(page):
     expect(summary).to_be_focused()  # patched in place: the control the user clicked is still there
 
 
+def test_sweep_links_quiz_marks_and_canvas_status(page):
+    # A query typed inside the hash still opens the page, with the query moved before the hash.
+    page.goto(f"{BASE}/#/course/987654?tab=notes")
+    expect(page.locator("[data-error] h3")).to_have_text("There’s no course 987654")
+    expect(page).to_have_url(f"{BASE}/?tab=notes#/course/987654")
+    # The right choice is marked the way the server marks it: case and spacing don't matter.
+    lid = 987653
+    qs = [{"id": 1, "idx": 0, "kind": "mcq", "question": "Which scope rule does bash use?", "choices": ["Static", "Dynamic"], "t": 30.0}]
+    graded = {"results": [{"id": 1, "kind": "mcq", "your_answer": "Static", "correct": False, "answer": "  dynamic ",
+                           "explanation": "", "t": 30.0}], "score": 0, "total": 1, "unmarked": 0, "saved": False}
+    page.route(re.compile(rf"/api/lectures/{lid}$"), lambda r: r.fulfill(json={"id": lid, "title": "Scoping", "course_id": None}))
+    page.route(re.compile(rf"/api/lectures/{lid}/quiz$"), lambda r: r.fulfill(
+        json={"questions": qs, "last_attempt": None} if r.request.method == "GET" else graded))
+    page.goto(f"{BASE}/#/quiz/{lid}")
+    page.locator(".qz-choice").first.click()
+    page.click("#qz-check")
+    expect(page.locator(".qz-choice.is-right")).to_have_text(re.compile("Dynamic"))
+    expect(page.locator(".qz-choice.is-wrong")).to_have_text(re.compile("Static"))
+    # A Canvas status that fails isn't the server being down.
+    page.route("**/api/canvas/status", lambda r: r.fulfill(status=500, json={"detail": "boom"}))
+    page.goto(f"{BASE}/#/")
+    expect(page.locator("#health")).to_have_text(re.compile("^Server ok"))
+
+
+@needs_fixture
+def test_sweep_text_only_deck_and_offline_notes_button(page):
+    lid = next(l for l in api("/api/lectures") if l["title"].startswith("PLC Lecture 1"))["id"]
+    # A deck read as text only has no images: no request for /null, and the viewer says why.
+    deck = {"id": 7, "title": "Overview.pptx", "source": "upload", "how": "manual", "score": None, "pages": 2, "thumb_w": None, "thumb_h": None}
+    slides = [{"no": n, "title": f"Slide title {n}", "text": "words", "first": 0.0, "ranges": [[0.0, 5.0]], "thumb": None, "image": None}
+              for n in (1, 2)]
+    page.route(f"**/api/lectures/{lid}/slides", lambda r: r.fulfill(json={"state": "aligned", "reason": None, "progress": None,
+               "error": None, "deck": deck, "slides": slides, "candidates": []}))
+    page.route(f"**/api/lectures/{lid}/segments", lambda r: r.fulfill(json=[{**s, "slide_no": 1 if s["idx"] % 2 else 2}
+                                                                            for s in r.fetch().json()]))
+    nulls = []
+    page.on("request", lambda r: r.url.endswith("/null") and nulls.append(r.url))
+    page.goto(f"{BASE}/?tab=transcript&slide=2#/lecture/{lid}")
+    expect(page.locator(".slide-mark .missing").first).to_contain_text("text only, no image")
+    expect(page.locator("#slide-dlg")).to_be_visible()
+    expect(page.locator("#slide-dlg-missing")).to_contain_text("text only")
+    expect(page.locator("#slide-dlg-img")).to_be_hidden()
+    page.keyboard.press("Escape")
+    assert not nulls
+
+    # Replacing Claude's notes with offline ones puts the button's label back once it's done.
+    def notes_api(route):
+        if route.request.method == "POST" and not route.request.post_data_json.get("force"):
+            return route.fulfill(status=409, json={"detail": "These notes were written by Claude."})
+        route.fulfill(json={"state": "none"})
+    page.route(f"**/api/lectures/{lid}/notes", notes_api)
+    page.goto(f"{BASE}/?tab=notes#/lecture/{lid}")
+    page.click("#nt-offline")
+    page.click("#confirm-ok")
+    expect(page.locator("#toast")).to_contain_text("Writing offline notes")
+    expect(page.locator("#nt-offline")).to_have_text("Write offline notes")
+    expect(page.locator("#nt-offline")).to_be_enabled()
+
+
 def test_supervisor_restarts_crashed_server(server, page):
     before = wait_health()["pid"]
     subprocess.run(["taskkill", "/PID", str(before), "/F"], capture_output=True)
