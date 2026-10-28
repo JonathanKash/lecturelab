@@ -2434,7 +2434,9 @@ def job_transcribe(job: dict) -> dict:
     say = lambda m: job_update(job["id"], progress=m)  # noqa: E731
     lock = FileLock(DATA / "transcribe.lock")
     if not lock.acquire():
-        job_update(job["id"], status="queued", retry_at=_sqlnow(120), owner_pid=None)
+        # attempts=0: waiting for another batch isn't a failed try, and a long wait would
+        # otherwise run up attempts until a later crash gets the job given up on
+        job_update(job["id"], status="queued", retry_at=_sqlnow(120), owner_pid=None, attempts=0)
         raise RetryLater("another transcription batch is running")
     stay_awake(True)
     try:

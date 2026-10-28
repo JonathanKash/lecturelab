@@ -2091,3 +2091,19 @@ def test_colab_off_refuses_an_explicit_colab_batch(ll, monkeypatch):
     lec = ll.get_lecture(lid)
     assert lec["status"] == "queued_transcribe" and lec["transcribe_fails"] == 0
 
+
+def test_waiting_for_another_batch_does_not_use_up_attempts(ll):
+    jid = ll.enqueue("transcribe", {"mode": "local"})
+    held = ll.FileLock(ll.DATA / "transcribe.lock")
+    assert held.acquire()
+    try:
+        for _ in range(4):
+            with ll.db() as con:
+                con.execute("UPDATE jobs SET retry_at=NULL WHERE id=?", (jid,))
+            ll.run_job(ll.claim_job(["transcribe"]))
+    finally:
+        held.release()
+    with ll.db() as con:  # the server dies while it finally runs: it's re-queued, not given up on
+        con.execute("UPDATE jobs SET status='running', owner_pid=999999, attempts=attempts+1 WHERE id=?", (jid,))
+    ll.requeue_orphaned_jobs()
+    assert ll.get_job(jid)["status"] == "queued"
