@@ -910,7 +910,8 @@ const binders = {
     $("#tr-queued").onclick = async () => {
       const r = await api("/api/transcribe", { method: "POST", body: { mode: "auto" } });
       toast(r.note || "Transcribing everything waiting in one Colab batch…");
-      watchJob(r.job_id, true).then(j => { if (j.status === "done") toast(`Transcribed ${j.result.transcribed.length} lecture(s) (${j.result.mode})`, 6000); render(); });
+      watchJob(r.job_id, true).then(j => { if (j.status === "done") toast(j.result.note ? `Nothing to transcribe: ${j.result.note}`
+        : `Transcribed ${j.result.transcribed.length} lecture(s) (${j.result.mode})`, 6000); render(); });
       render();
     };
   },
