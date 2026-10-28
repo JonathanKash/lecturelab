@@ -619,6 +619,9 @@ const fmtDate = iso => { if (!iso) return ""; const [y, m, d] = iso.split("-").m
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", ...(y !== new Date().getFullYear() && { year: "numeric" }) })
     .format(new Date(y, m - 1, d)); };
 const utc = s => Date.parse(s.replace(" ", "T") + "Z");
+// Canvas dates are ISO with a zone ("2026-10-13T03:00:00Z"): show the local day, not the UTC one.
+const canvasDay = s => !s ? "" : /^\d{4}-\d\d-\d\d$/.test(s) ? fmtDate(s) : isNaN(Date.parse(s)) ? String(s).slice(0, 10)
+  : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(s));
 const fmtWhen = s => s ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(utc(s)) : "";
 const STATUS = { ingesting: ["adding", "now"], queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "now"],
   transcribed: ["transcribed", "ok"], aligned: ["aligned", "ok"], notes_queued: ["notes queued", ""],
@@ -2003,7 +2006,7 @@ async function loadCanvasItems() {
     <label data-cv="${esc(it.key)}">
       <input type="checkbox" value="${esc(it.key)}" ${["pulled", "queued"].includes(it.status) ? "disabled" : ""}>
       <span class="chip kind">${esc(it.kind)}</span><span style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(it.title || it.key)}<br>
-      <span class="muted">${esc(it.page_url || "")} ${esc((it.created_at || "").slice(0, 10))}</span>
+      <span class="muted">${esc(it.page_url || "")} ${esc(canvasDay(it.created_at))}</span>
       ${it.error ? `<br><span class="err">${esc(it.error)}</span>` : ""}</span>
       <span class="chip ${it.status === "pulled" ? "ok" : it.status === "error" ? "bad" : ""}">${esc(it.status)}</span></label>`).join("")
     : `<p class="muted">Nothing found yet. Press <b>Scan Canvas</b>.</p>`;
