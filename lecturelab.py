@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
-from datetime import date as Date, datetime, timezone
+from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -3947,12 +3947,33 @@ def quota_reset_at(text: str, now: float | None = None) -> float:
     now = time.time() if now is None else now
     if m := re.search(r"\|(\d{10})\b", text):
         return float(m[1])
-    if m := re.search(r"(?i)resets?\s+(?:at\s+)?(\d{1,2})(?::(\d\d))?\s*([ap])\.?m", text):
-        hour = int(m[1]) % 12 + (12 if m[3].lower() == "p" else 0)
-        t = datetime.fromtimestamp(now).replace(hour=hour, minute=int(m[2] or 0), second=0, microsecond=0)
-        ts = t.timestamp()
-        return (ts if ts > now else ts + 86400) + 120  # a little past the reset
+    # "resets 3pm", the weekly limit's "resets Oct 30, 9am", or a weekday: "resets Mon 9:30am"
+    if m := re.search(r"(?i)resets?\s+(?:on\s+)?(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+                      r"\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s+|(?P<wd>mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?"
+                      r"(?:at\s+)?(?P<h>\d{1,2})(?::(?P<mi>\d\d))?\s*(?P<ap>[ap])\.?m", text):
+        base = datetime.fromtimestamp(now)
+        t = base.replace(hour=int(m["h"]) % 12 + (12 if m["ap"].lower() == "p" else 0), minute=int(m["mi"] or 0),
+                         second=0, microsecond=0)
+        try:
+            if m["mon"]:
+                t = t.replace(month=_MONTHS.index(m["mon"].lower()) + 1, day=int(m["day"]))
+                if t.timestamp() < now - 86400:  # "resets Jan 2" said on Dec 30
+                    t = t.replace(year=t.year + 1)
+                elif t.timestamp() <= now:  # already past (a clock or time zone off): don't retry in a tight loop
+                    return now + 3600
+                return t.timestamp() + 120
+        except ValueError:  # no such day
+            return now + 3600
+        if m["wd"]:
+            t += timedelta(days=(_WEEKDAYS.index(m["wd"].lower()) - base.weekday()) % 7)
+        if t.timestamp() <= now:
+            t += timedelta(days=7 if m["wd"] else 1)
+        return t.timestamp() + 120  # a little past the reset
     return now + 3600
+
+
+_MONTHS = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+_WEEKDAYS = "mon tue wed thu fri sat sun".split()
 
 
 def _claude_run(cmd: list[str], prompt: str, timeout: float) -> subprocess.CompletedProcess:

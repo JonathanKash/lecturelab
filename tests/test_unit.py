@@ -2402,3 +2402,18 @@ def test_moving_a_lecture_rematches_an_automatic_deck_only(ll):
         queued = [r[0] for r in con.execute("SELECT lecture_id FROM jobs WHERE kind='slides' AND status='queued' "
                                             "ORDER BY id")]
     assert queued == [auto, none]
+
+
+def test_quota_reset_reads_the_weekly_limits_day(ll):
+    now = datetime(2026, 10, 28, 18, 0).timestamp()  # a Wednesday
+    at = lambda s: datetime.fromtimestamp(ll.quota_reset_at(s, now) - 120)  # noqa: E731
+    assert at("Weekly limit reached · resets Oct 30, 9am") == datetime(2026, 10, 30, 9, 0)
+    assert at("Opus weekly limit reached ∙ resets Nov 2 at 3:30pm (America/New_York)") == datetime(2026, 11, 2, 15, 30)
+    assert at("You've hit your weekly limit · resets Mon 9am") == datetime(2026, 11, 2, 9, 0)
+    assert at("weekly limit · resets Wed 5pm") == datetime(2026, 11, 4, 17, 0)  # today's 5pm has passed
+    assert at("weekly limit · resets Wednesday 7pm") == datetime(2026, 10, 28, 19, 0)
+    assert at("resets 3pm") == datetime(2026, 10, 29, 15, 0)  # the plain form still works
+    dec = datetime(2026, 12, 30, 12, 0).timestamp()
+    assert datetime.fromtimestamp(ll.quota_reset_at("weekly limit · resets Jan 2, 9am", dec) - 120) == datetime(2027, 1, 2, 9)
+    assert ll.quota_reset_at("weekly limit · resets Feb 30, 9am", now) == now + 3600  # nonsense: try again in an hour
+    assert ll.quota_reset_at("weekly limit · resets Oct 28, 9am", now) == now + 3600  # earlier today: not a tight loop
