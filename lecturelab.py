@@ -2020,6 +2020,8 @@ def canvas_auto_pull() -> list[int]:
 
 def job_canvas_scan(job: dict) -> dict:
     course = find_course(job["payload"]["course_id"])
+    if not course:  # deleted while the scan waited in the queue
+        return {"skipped": "course deleted"}
     if not course["canvas_id"]:
         canvas_courses()  # links LectureLab courses to Canvas ids by course code
         course = find_course(course["id"])

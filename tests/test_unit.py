@@ -2307,3 +2307,7 @@ def test_releasing_a_missing_lecture_is_a_404(ll):
     from fastapi.testclient import TestClient
     c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
     assert c.post("/api/lectures/999/not-duplicate").status_code == 404
+
+
+def test_a_canvas_scan_of_a_deleted_course_is_skipped(ll):
+    assert ll.job_canvas_scan({"id": 1, "payload": {"course_id": 999}}) == {"skipped": "course deleted"}
