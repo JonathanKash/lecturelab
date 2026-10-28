@@ -620,7 +620,7 @@ const fmtDate = iso => { if (!iso) return ""; const [y, m, d] = iso.split("-").m
     .format(new Date(y, m - 1, d)); };
 const utc = s => Date.parse(s.replace(" ", "T") + "Z");
 const fmtWhen = s => s ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(utc(s)) : "";
-const STATUS = { queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "now"],
+const STATUS = { ingesting: ["adding", "now"], queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "now"],
   transcribed: ["transcribed", "ok"], aligned: ["aligned", "ok"], notes_queued: ["notes queued", ""],
   notes_running: ["writing notes", "now"], notes_done: ["notes ready", "ok"], exported: ["notes ready", "ok"],
   duplicate: ["possible duplicate", "warn"], error: ["error", "bad"], waiting_quota: ["waiting for plan limit", "warn"] };
@@ -636,7 +636,7 @@ async function loadCourses() {
 async function loadLectures() { state.lectures = await api("/api/lectures"); }
 
 // Where the transcript is, as a tape texture. Everything after "transcribed" has one.
-const tapeState = st => st === "queued_transcribe" ? "waiting" : st === "transcribing" ? "active"
+const tapeState = st => st === "queued_transcribe" || st === "ingesting" ? "waiting" : st === "transcribing" ? "active"
   : st === "error" ? "error" : st === "duplicate" ? "dup" : "done";
 
 function lectureList(lectures, course = null, inboxes = []) {
