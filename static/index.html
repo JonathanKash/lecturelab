@@ -2120,7 +2120,9 @@ async function watchJob(id, quiet = false) {
 
 async function heartbeat() {
   const h$ = $("#health");
-  try { const h = await api("/api/health"); h$.textContent = `Server ok, v${h.version}`; h$.classList.remove("down"); await loadCanvasStatus();
+  try { const h = await api("/api/health"); h$.textContent = `Server ok, v${h.version}`; h$.classList.remove("down");
+    if (!state.courses.length) await loadCourses().catch(() => {});  // the server was down when the page opened
+    await loadCanvasStatus().catch(() => {});  // a Canvas status that fails isn't the server being unreachable
     // A batch started from the CLI isn't a server job, so nothing else re-renders when it finishes: re-check here,
     // and only re-render once it's over and nothing is playing (a re-render rebuilds the player).
     if ($("#tr-queued")?.textContent === "Transcribing…" || $("#tr-auto")?.disabled) {
