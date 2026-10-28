@@ -358,7 +358,16 @@ def cmd_install_tasks(args) -> int:
     return r.returncode
 
 
+def _safe_console() -> None:
+    """Output redirected to a file or pipe is cp1252 on Windows: a lecture titled with an emoji or
+    a ✓ would crash the command after its work is done. Print a ? for those instead."""
+    for s in (sys.stdout, sys.stderr):
+        if s is not None and hasattr(s, "reconfigure"):
+            s.reconfigure(errors="replace")
+
+
 def main(argv=None) -> int:
+    _safe_console()
     p = argparse.ArgumentParser(prog="lecturelab", description="LectureLab v2")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("serve", help="run the web server in the foreground").set_defaults(fn=cmd_serve)

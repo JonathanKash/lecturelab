@@ -2288,3 +2288,10 @@ def test_stop_while_the_supervisor_waits_to_restart_starts_no_new_server(ll, mon
     monkeypatch.setattr(cli.time, "sleep", lambda s: flag.write_text("stop"))  # `lecturelab stop` meanwhile
     assert cli.cmd_supervise(None) == 0
     assert len(started) == 1 and not flag.exists()
+
+
+def test_cli_output_redirected_to_a_file_survives_any_title():
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+    r = subprocess.run([sys.executable, "-c", "import cli; cli._safe_console(); print('Caf\u00e9 \u2615 lecture')"],
+                       capture_output=True, env=env, cwd=os.path.dirname(os.path.dirname(__file__)))
+    assert r.returncode == 0, r.stderr
