@@ -2429,6 +2429,8 @@ def job_transcribe(job: dict) -> dict:
     """payload: {lecture_ids?: [...], mode: auto|colab|local}. With no ids, takes every queued lecture.
     auto = Colab, unless units are low or Colab failed twice in a row; then local CPU."""
     mode = job["payload"].get("mode", "auto")
+    if mode == "colab" and not COLAB_ENABLED:  # off means off, even when Colab is asked for by name
+        raise RuntimeError("Colab is turned off on this server (LECTURELAB_COLAB=off); transcribe locally instead.")
     say = lambda m: job_update(job["id"], progress=m)  # noqa: E731
     lock = FileLock(DATA / "transcribe.lock")
     if not lock.acquire():

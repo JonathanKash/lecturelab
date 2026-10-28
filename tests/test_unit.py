@@ -2077,3 +2077,17 @@ def test_a_new_recording_makes_the_same_hours_batch(ll, monkeypatch):
     ll.enqueue("ingest", {"path": "inbox:x.mp4"})  # what the inbox scan queues
     out = ll.run_sync()
     assert out["transcribe"] == 1 and ran == ["ingest", "transcribe"]
+
+
+# ---------------------------------------------------------------- sweep regressions
+
+def test_colab_off_refuses_an_explicit_colab_batch(ll, monkeypatch):
+    monkeypatch.setattr(ll, "COLAB_ENABLED", False)
+    monkeypatch.setattr(ll, "transcribe_batch_colab", lambda *a, **k: pytest.fail("Colab is off"))
+    monkeypatch.setattr(ll, "stop_orphan_sessions", lambda *a, **k: pytest.fail("Colab is off"))
+    lid = _lecture(ll, "queued_transcribe")
+    with pytest.raises(RuntimeError, match="LECTURELAB_COLAB=off"):
+        ll.job_transcribe({"id": 1, "payload": {"mode": "colab"}})
+    lec = ll.get_lecture(lid)
+    assert lec["status"] == "queued_transcribe" and lec["transcribe_fails"] == 0
+
