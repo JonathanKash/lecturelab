@@ -1495,7 +1495,10 @@ async function writeNotes(id, mode, btn, force = false) {
     applyNotes(id, d);
   } catch (x) {
     if (x.status === 409 && mode === "offline" && !force) {
-      if (await confirmDanger("Replace Claude’s notes with offline notes?", x.message, "Replace anyway")) writeNotes(id, mode, btn, true);
+      if (await confirmDanger("Replace Claude’s notes with offline notes?", x.message, "Replace anyway")) {
+        if (btn?.isConnected) btn.textContent = label;  // the nested call takes the label from here and puts it back itself
+        return await writeNotes(id, mode, btn, true);
+      }
     } else toast(x.message, 6000);
   } finally { if (btn?.isConnected) { btn.disabled = false; btn.textContent = label; } }
 }
