@@ -1660,13 +1660,14 @@ function qzVerdict(q, r) {
     ${r.explanation ? `<p class="qz-why">${mdInline(cardText(r.explanation), {})}</p>` : ""}
     ${r.t != null ? `<p class="small"><a href="?t=${+r.t}#/lecture/${+qz.id}" target="_blank" rel="noopener">Hear it in the lecture at ${fmtTs(r.t)}<span class="vh"> (opens in a new tab)</span></a></p>` : ""}</div>`;
 }
+const qzNorm = s => String(s ?? "").trim().toLowerCase().replace(/\s+/g, " ");  // = _norm_answer in lecturelab.py
 function qzQuestion(q) {
   const r = qz.res?.[q.id], locked = qz.res || qz.busy ? " disabled" : "", n = q.idx + 1;  // checked or being checked
   const text = `<span class="num" aria-hidden="true">${n}</span><span class="qz-text">${mdInline(cardText(q.question), {})}</span>`;
   const body = q.kind === "mcq"
     ? `<fieldset class="qz-q-body"><legend class="qz-head"><span class="vh">Question ${n}: </span>${text}</legend>
         <div class="qz-choices">${(q.choices || []).map(c => {
-          const right = r && r.answer === c, mine = r && r.your_answer === c;
+          const right = r && qzNorm(r.answer) === qzNorm(c), mine = r && r.your_answer === c;  // marked as the server marks it
           return `<label class="qz-choice${right ? " is-right" : ""}${mine && !right ? " is-wrong" : ""}">
             <input type="radio" name="qz-${esc(q.id)}" value="${esc(c)}"${(r ? mine : qz.draft[q.id] === c) ? " checked" : ""}${locked}>
             <span>${mdInline(cardText(c), {})}${right || mine ? `<span class="qz-tag">${right && mine ? "Your answer, and the right one" : right ? "Right answer" : "Your answer"}</span>` : ""}</span></label>`; }).join("")}</div></fieldset>`
