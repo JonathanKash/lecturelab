@@ -805,7 +805,8 @@ const views = {
       ? `<video id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/video"></video>`
       : `<audio id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/audio"></audio>`;
     const dup = l.status === "duplicate" ? `<div class="banner" id="dup-banner">
-        This looks like the same recording as <a href="#/lecture/${l.dup_of}">lecture ${l.dup_of}</a>, so it won’t be processed.
+        ${l.dup_of ? `This looks like the same recording as <a href="#/lecture/${+l.dup_of}">lecture ${+l.dup_of}</a>, so it won’t be processed.`
+          : "This looked like the same recording as a lecture that has since been deleted, so it won’t be processed until you release it."}
         <div class="row" style="margin-top:12px"><button id="not-dup">Not a duplicate</button>
         <button class="danger" id="del-dup">Delete this copy</button></div></div>` : "";
     const err = l.status === "error" ? `<div class="banner bad"><b>Error:</b> ${esc(l.error)}</div>` : "";
