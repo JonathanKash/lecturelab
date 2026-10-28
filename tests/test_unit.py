@@ -2222,3 +2222,15 @@ def test_a_read_only_file_in_the_inbox_is_still_taken_in(ll, noise, tmp_path, mo
         assert len(ll.scan_inboxes(require_stable=False)) == 1
     finally:
         os.chmod(f, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_a_password_protected_deck_from_canvas_says_so(ll):
+    import pymupdf as fitz
+    rel = "Slides/test/locked.pdf"
+    plain = _pdf(ll.DATA / "Slides/test/plain.pdf", ["Grammars: BNF"])
+    doc = fitz.open(plain)
+    doc.save(ll.DATA / rel, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="u", owner_pw="o")
+    doc.close()
+    did = _deck(ll, "locked", ll.find_course("COP4020")["id"], path=rel, source="canvas")
+    with pytest.raises(ll.DeckError, match="password-protected"):
+        ll.extract_deck(did)

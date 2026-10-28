@@ -2933,6 +2933,8 @@ def extract_deck(deck_id: int, progress=None) -> dict:
             raise DeckError("This PDF couldn't be opened; it may be damaged or not really a PDF. "
                             "Export it again and attach that.") from e
         with doc:
+            if doc.needs_pass:  # a deck from Canvas or Drive hasn't been through check_deck_file
+                raise DeckError("This PDF is password-protected. Export a copy without a password and attach that.")
             if doc.page_count == 0:
                 raise DeckError("This PDF has no pages. Export the deck again and attach that.")
             if doc.page_count > MAX_DECK_PAGES:
