@@ -4668,7 +4668,8 @@ def lecture_link(lecture_id: int, t: float | None = None) -> str:
 
 def _anki_html(s: str) -> str:
     import html
-    return html.escape(s or "").replace("\t", "    ").replace("\n", "<br>")
+    s = (s or "").replace("\r\n", "\n").replace("\r", "\n")  # a stray \r ends the row in Anki's importer
+    return html.escape(s).replace("\t", "    ").replace("\n", "<br>")
 
 
 def anki_tsv(course_id: int | None = None, lecture_id: int | None = None) -> str:

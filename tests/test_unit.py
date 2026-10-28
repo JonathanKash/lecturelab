@@ -2311,3 +2311,11 @@ def test_releasing_a_missing_lecture_is_a_404(ll):
 
 def test_a_canvas_scan_of_a_deleted_course_is_skipped(ll):
     assert ll.job_canvas_scan({"id": 1, "payload": {"course_id": 999}}) == {"skipped": "course deleted"}
+
+
+def test_anki_rows_survive_carriage_returns(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    with ll.db() as con:
+        con.execute("UPDATE cards SET back='one\r\ntwo\rthree' WHERE kind='qa'")
+    lines = ll.anki_tsv(lecture_id=lid).splitlines()[6:]  # splitlines breaks on \r, as Anki's reader does
+    assert len(lines) == 2 and all(len(x.split("\t")) == 6 for x in lines)
