@@ -2494,7 +2494,7 @@ def job_transcribe(job: dict) -> dict:
                             (f"audio file missing: {l['audio_path']}", l["id"]))
             lectures = [l for l in lectures if l not in missing]
             if not lectures:
-                return {"transcribed": [], "note": "nothing waiting"}
+                return {"transcribed": [], "note": "no lectures are waiting"}
             for l in lectures:
                 con.execute("UPDATE lectures SET status='transcribing', error=NULL WHERE id=?", (l["id"],))
             audio_sec = sum(l["duration_sec"] or 0 for l in lectures)

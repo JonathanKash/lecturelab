@@ -957,6 +957,31 @@ def test_sweep_text_only_deck_and_offline_notes_button(page):
     expect(page.locator("#nt-offline")).to_be_enabled()
 
 
+@needs_fixture
+def test_sweep_empty_batch_deleted_original_and_adding_label(page):
+    lid = next(l for l in api("/api/lectures") if l["title"].startswith("PLC Lecture 1"))["id"]
+    lec = {"status": "queued_transcribe"}
+    page.route(re.compile(rf"/api/lectures/{lid}$"), lambda r: r.fulfill(json={**r.fetch().json(), **lec}))
+    # A batch that finds nothing to do says so, instead of "Transcribed undefined lecture(s)".
+    page.route("**/api/transcribe", lambda r: r.fulfill(json={"job_id": 424242}) if r.request.method == "POST" else r.fallback())
+    page.route("**/api/jobs/424242", lambda r: r.fulfill(json={"id": 424242, "status": "done", "kind": "transcribe",
+                                                               "result": {"note": "no lectures are waiting"}}))
+    page.goto(f"{BASE}/#/lecture/{lid}")
+    page.click("#tr-local")
+    expect(page.locator("#toast")).to_have_text("Nothing to transcribe: no lectures are waiting", timeout=15_000)
+    # A duplicate whose original was deleted explains that, instead of linking "lecture null".
+    lec.update(status="duplicate", dup_of=None)
+    page.goto(f"{BASE}/#/")
+    page.goto(f"{BASE}/#/lecture/{lid}")
+    expect(page.locator("#dup-banner")).to_contain_text("has since been deleted")
+    expect(page.locator("#dup-banner a")).to_have_count(0)
+    # A recording that's still being added has a label, not the raw status.
+    page.route(re.compile(r"/api/lectures$"), lambda r: r.fulfill(json=[{**l, "status": "ingesting"} if l["id"] == lid else l
+                                                                         for l in r.fetch().json()]))
+    page.goto(f"{BASE}/#/")
+    expect(page.locator('[data-status="ingesting"]').first).to_have_text("adding")
+
+
 def test_supervisor_restarts_crashed_server(server, page):
     before = wait_health()["pid"]
     subprocess.run(["taskkill", "/PID", str(before), "/F"], capture_output=True)
