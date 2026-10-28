@@ -9,6 +9,10 @@ Turns real lecture recordings into notes, flashcards and quizzes good enough to 
   - Never pass `--bare`: it forces API-key auth.
   - `--model sonnet` for outline, sections, flashcards and quiz. `--model opus` only for the final check pass.
   - Cache every call by input hash. On "usage limit reached", park the job and retry later. The offline generator runs only when the user asks.
+  - Calls are isolated (`--setting-sources= --strict-mcp-config --tools= --no-session-persistence`, cwd `data/claude-work`) so the user's hooks, MCP servers and CLAUDE.md don't leak in: about 600 context tokens instead of 53k. The prompt goes on stdin (Windows caps the command line at 32 KB).
+  - One claude process at a time (`LECTURELAB_CLAUDE_PARALLEL`): the laptop is short on RAM.
+  - Tests never reach the real `claude`: `tests/conftest.py` sets `LECTURELAB_CLAUDE=off` and `LECTURELAB_AUTO_NOTES=off`, which e2e servers inherit. Unit tests fake `claude` instead.
+- **Exports go to `Documents\AI Notes\Lectures`**, which the user's Recall knowledge base indexes. Tests must point `LECTURELAB_NOTES_DIR` at a temp dir (the `ll` fixture does), never at the real folder. An export only ever deletes files it wrote itself (`notes.export_paths`).
 - **Transcription runs on a Colab GPU** through the official Colab CLI (`google-colab-cli`) inside WSL Ubuntu.
   - Call it with `wsl.exe -d Ubuntu -e ...`. The default distro is docker-desktop, so always name Ubuntu.
   - One Colab session per batch, and `colab stop` always runs in a `finally` block.
@@ -30,7 +34,7 @@ Turns real lecture recordings into notes, flashcards and quizzes good enough to 
 
 ## Layout
 - `lecturelab.py`: all server-side code (config, DB, ingest, transcription, slides, notes, export, sync, FastAPI).
-- `cli.py`: the `lecturelab` command (`serve`, `supervise`, `stop`, `install-tasks`, and more as stages land).
+- `cli.py`: the `lecturelab` command (`serve`, `supervise`, `stop`, `sync`, `notes`, `transcribe`, `slides`, `install-tasks`, ...).
 - `colab/transcribe.py`: runs inside the Colab VM.
 - `static/index.html`: the whole UI. Vanilla JS, with KaTeX from a CDN as the only library. No Node build step.
 - `tests/test_unit.py`, `tests/test_e2e.py`: pytest. The e2e suite starts a supervised server on port 8766 with a temp data dir and drives the installed Chrome with Playwright.
@@ -39,7 +43,8 @@ Turns real lecture recordings into notes, flashcards and quizzes good enough to 
 ## Running
 ```powershell
 .\.venv\Scripts\lecturelab serve              # foreground
-.\.venv\Scripts\lecturelab install-tasks --start   # logon task: hidden, auto-restart, logs to server.log
+.\.venv\Scripts\lecturelab install-tasks --start   # logon server task (hidden, auto-restart, logs to server.log) + hourly sync
+.\.venv\Scripts\lecturelab sync              # Canvas, inboxes, one Colab batch, notes, export; a lock file keeps it to one at a time
 .\.venv\Scripts\python -m pytest              # unit + e2e
 ```
 
