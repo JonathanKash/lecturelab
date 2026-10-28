@@ -62,7 +62,14 @@ def cmd_supervise(args) -> int:
             if time.time() - started > 300:
                 backoff = 1  # it ran fine for a while, so this is a fresh crash, not a crash loop
             log.warning("server exited with code %s; restarting in %ss", code, backoff)
-            time.sleep(backoff)
+            for _ in range(backoff * 4):  # `stop` during the wait: don't start a server it can't see to kill
+                if STOP_FLAG.exists():
+                    break
+                time.sleep(0.25)
+            if STOP_FLAG.exists():
+                STOP_FLAG.unlink(missing_ok=True)
+                log.info("supervisor stopping on request")
+                return 0
             backoff = min(backoff * 2, 60)
     except Exception:
         log.exception("supervisor crashed")  # pythonw has no console; make the death visible
@@ -112,6 +119,9 @@ def cmd_add(args) -> int:
     course = ll.find_course(args.course)
     if args.course and not course:
         print(f"unknown course {args.course!r}; known: {', '.join(c['code'] for c in ll.list_courses())}")
+        return 2
+    if args.date and not ll.valid_date(args.date):  # up front, not after a 20-minute download
+        print(f"--date {args.date!r} must be a real day as YYYY-MM-DD")
         return 2
     payload = {"course_id": course and course["id"], "title": args.title, "date": args.date}
     if args.source.lower().startswith(("http://", "https://")):
@@ -206,6 +216,10 @@ def cmd_notes(args) -> int:
 def _notes(ids: list[int], args) -> int:
     failed = 0
     for lid in ids:
+        if not ll.get_lecture(lid):
+            print(f"lecture {lid}: no such lecture")
+            failed += 1
+            continue
         with ll.db() as con:
             busy = con.execute("SELECT 1 FROM jobs WHERE kind='notes' AND lecture_id=? AND status='running'",
                                (lid,)).fetchone()
@@ -351,7 +365,16 @@ def cmd_install_tasks(args) -> int:
     return r.returncode
 
 
+def _safe_console() -> None:
+    """Output redirected to a file or pipe is cp1252 on Windows: a lecture titled with an emoji or
+    a ✓ would crash the command after its work is done. Print a ? for those instead."""
+    for s in (sys.stdout, sys.stderr):
+        if s is not None and hasattr(s, "reconfigure"):
+            s.reconfigure(errors="replace")
+
+
 def main(argv=None) -> int:
+    _safe_console()
     p = argparse.ArgumentParser(prog="lecturelab", description="LectureLab v2")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("serve", help="run the web server in the foreground").set_defaults(fn=cmd_serve)

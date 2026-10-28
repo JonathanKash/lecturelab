@@ -457,7 +457,12 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
 
 @media (pointer: coarse) {
   button, aside nav a, .tabs button { min-height: 44px; }
+  input:not([type="checkbox"]):not([type="radio"]), select { min-height: 44px; }
+  .notes-toc a { display: flex; align-items: center; min-height: 44px; }
   .seg .ts { min-height: 0; }
+  /* timestamps and note links stay small in the layout, but take a 44px tall tap */
+  .seg .ts, #pane-notes .ts:not(.np > .ts), #pane-notes .link { position: relative; }
+  .seg .ts::after, #pane-notes .ts::after, #pane-notes .link::after { content: ""; position: absolute; inset: -12px -8px; }
   .keys { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -619,8 +624,11 @@ const fmtDate = iso => { if (!iso) return ""; const [y, m, d] = iso.split("-").m
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", ...(y !== new Date().getFullYear() && { year: "numeric" }) })
     .format(new Date(y, m - 1, d)); };
 const utc = s => Date.parse(s.replace(" ", "T") + "Z");
+// Canvas dates are ISO with a zone ("2026-10-13T03:00:00Z"): show the local day, not the UTC one.
+const canvasDay = s => !s ? "" : /^\d{4}-\d\d-\d\d$/.test(s) ? fmtDate(s) : isNaN(Date.parse(s)) ? String(s).slice(0, 10)
+  : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(s));
 const fmtWhen = s => s ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(utc(s)) : "";
-const STATUS = { queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "now"],
+const STATUS = { ingesting: ["adding", "now"], queued_transcribe: ["waiting to transcribe", ""], transcribing: ["transcribing", "now"],
   transcribed: ["transcribed", "ok"], aligned: ["aligned", "ok"], notes_queued: ["notes queued", ""],
   notes_running: ["writing notes", "now"], notes_done: ["notes ready", "ok"], exported: ["notes ready", "ok"],
   duplicate: ["possible duplicate", "warn"], error: ["error", "bad"], waiting_quota: ["waiting for plan limit", "warn"] };
@@ -636,7 +644,7 @@ async function loadCourses() {
 async function loadLectures() { state.lectures = await api("/api/lectures"); }
 
 // Where the transcript is, as a tape texture. Everything after "transcribed" has one.
-const tapeState = st => st === "queued_transcribe" ? "waiting" : st === "transcribing" ? "active"
+const tapeState = st => st === "queued_transcribe" || st === "ingesting" ? "waiting" : st === "transcribing" ? "active"
   : st === "error" ? "error" : st === "duplicate" ? "dup" : "done";
 
 function lectureList(lectures, course = null, inboxes = []) {
@@ -808,7 +816,8 @@ const views = {
       ? `<video id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/video"></video>`
       : `<audio id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/audio"></audio>`;
     const dup = l.status === "duplicate" ? `<div class="banner" id="dup-banner">
-        This looks like the same recording as <a href="#/lecture/${l.dup_of}">lecture ${l.dup_of}</a>, so it won’t be processed.
+        ${l.dup_of ? `This looks like the same recording as <a href="#/lecture/${+l.dup_of}">lecture ${+l.dup_of}</a>, so it won’t be processed.`
+          : "This looked like the same recording as a lecture that has since been deleted, so it won’t be processed until you release it."}
         <div class="row" style="margin-top:12px"><button id="not-dup">Not a duplicate</button>
         <button class="danger" id="del-dup">Delete this copy</button></div></div>` : "";
     const err = l.status === "error" ? `<div class="banner bad"><b>Error:</b> ${esc(l.error)}</div>` : "";
@@ -913,7 +922,8 @@ const binders = {
     $("#tr-queued").onclick = async () => {
       const r = await api("/api/transcribe", { method: "POST", body: { mode: "auto" } });
       toast(r.note || "Transcribing everything waiting in one Colab batch…");
-      watchJob(r.job_id, true).then(j => { if (j.status === "done") toast(`Transcribed ${j.result.transcribed.length} lecture(s) (${j.result.mode})`, 6000); render(); });
+      watchJob(r.job_id, true).then(j => { if (j.status === "done") toast(j.result.note ? `Nothing to transcribe: ${j.result.note}`
+        : `Transcribed ${j.result.transcribed.length} lecture(s) (${j.result.mode})`, 6000); render(); });
       render();
     };
   },
@@ -950,12 +960,19 @@ const binders = {
     if (v) v.onerror = () => { // e.g. an .mkv the browser can't decode: fall back to the normalized audio
       v.outerHTML = `<audio id="player" controls preload="metadata" src="/api/lectures/${id}/media/audio"></audio>`; bindPlayer(); };
     const startTranscribe = mode => async () => {
-      const { job_id } = await api("/api/transcribe", { method: "POST", body: { lecture_ids: [+id], mode } });
-      toast(mode === "local" ? "Transcribing on this laptop’s CPU…" : "Sending to a Colab GPU…");
+      const btns = [$("#tr-auto"), $("#tr-local")].filter(Boolean);
+      btns.forEach(b => b.disabled = true);  // a second click must not start a second batch
+      let job_id, queued;
+      try { ({ job_id, queued } = await api("/api/transcribe", { method: "POST", body: { lecture_ids: [+id], mode } })); }
+      catch (e) { btns.forEach(b => b.disabled = false); toast(e.message, 6000); return; }
+      const m = queued || mode;  // already queued: say how that batch runs, not what this click asked for
+      toast((queued ? "Already queued: " : "") + (m === "local" ? "transcribing on this laptop’s CPU…"
+        : m === "colab" ? "sending to a Colab GPU…" : "sending to a Colab GPU, or this laptop if Colab is short…"));
       render();
       const j = await watchJob(job_id, true);
-      if (j.status === "done") { toast(`Transcribed (${j.result.mode}${j.result.reason ? ": " + j.result.reason : ""})`, 6000); }
-      if (location.hash === `#/lecture/${id}`) render();
+      if (j.status === "done") { toast(j.result.note ? `Nothing to transcribe: ${j.result.note}`
+        : `Transcribed (${j.result.mode}${j.result.reason ? ": " + j.result.reason : ""})`, 6000); }
+      if (location.hash === `#/lecture/${id}`) renderKeepingPlace();  // the new transcript, without losing your place
     };
     if ($("#tr-auto")) $("#tr-auto").onclick = startTranscribe("auto");
     if ($("#tr-local")) $("#tr-local").onclick = startTranscribe("local");
@@ -1076,7 +1093,9 @@ function setSlides(id, d) {
   clearTimeout(slides.poll); slides.req++;  // anything still in flight is older than this
   Object.assign(slides, { id, data: d, byNo: new Map((d?.slides || []).map(s => [s.no, s])), shown: null, html: "", deferred: false });
 }
-const slideImg = (s, d, cls = "slide-img") => `<button type="button" class="${cls}" data-open-slide="${esc(s.no)}" style="--ar:${slideAr(d)}"
+const slideImg = (s, d, cls = "slide-img") => !s.thumb  // a deck read as text only (a PPTX LibreOffice couldn't render) has no images
+  ? `<div class="${cls} missing" style="--ar:${slideAr(d)}">Slide ${esc(s.no)}${s.title ? `, ${esc(s.title)}` : ""}: text only, no image</div>`
+  : `<button type="button" class="${cls}" data-open-slide="${esc(s.no)}" style="--ar:${slideAr(d)}"
   aria-label="Open slide ${esc(s.no)}: ${esc(slideName(s))}"><img src="${esc(s.thumb)}" alt="" loading="lazy" decoding="async"></button>`;
 const slideMark = (s, d) => `<div class="slide-mark" data-slide="${esc(s.no)}"><span class="no" aria-hidden="true">Slide ${esc(s.no)}</span>
   <div><h4 class="mark-title"><span class="vh">Slide ${esc(s.no)}: </span>${esc(slideName(s))}</h4>${slideImg(s, d, "slide-img mark-thumb")}</div></div>`;
@@ -1278,8 +1297,11 @@ function openSlide(no) {
   slides.viewing = no; setSlideParam(no);
   $("#slide-dlg-h").textContent = slideName(s);
   $("#slide-dlg-n").textContent = `Slide ${s.no} of ${d.deck.pages}`;
-  const img = $("#slide-dlg-img"); img.hidden = false; $("#slide-dlg-missing").hidden = true;
-  img.style.aspectRatio = slideAr(d); img.alt = `Slide ${s.no}: ${slideName(s)}`; img.src = s.image;
+  const img = $("#slide-dlg-img"), missing = $("#slide-dlg-missing");
+  img.hidden = !s.image; missing.hidden = !!s.image;
+  img.style.aspectRatio = slideAr(d); img.alt = `Slide ${s.no}: ${slideName(s)}`;
+  if (s.image) img.src = s.image;
+  else { img.removeAttribute("src"); missing.textContent = "This deck was read as text only, so there’s no image of this slide."; }
   const play = $("#slide-play"), later = (s.ranges || []).slice(1);
   play.disabled = s.first == null;
   play.textContent = s.first == null ? "Not shown in this recording" : `Play from ${fmtTs(s.first)}`;
@@ -1292,7 +1314,8 @@ function openSlide(no) {
     (play.disabled ? ($("#slide-next").disabled ? $("#slide-close") : $("#slide-next")) : play).focus();
   } else if (document.activeElement?.disabled || !$("#slide-dlg").contains(document.activeElement)) $("#slide-close").focus();
 }
-$("#slide-dlg-img").addEventListener("error", e => { if (!e.target.getAttribute("src")) return; e.target.hidden = true; $("#slide-dlg-missing").hidden = false; });
+$("#slide-dlg-img").addEventListener("error", e => { if (!e.target.getAttribute("src")) return; e.target.hidden = true;
+  $("#slide-dlg-missing").textContent = "This slide’s image isn’t available right now. Reload the page in a minute."; $("#slide-dlg-missing").hidden = false; });
 $("#slide-prev").onclick = () => openSlide(slides.viewing - 1);
 $("#slide-next").onclick = () => openSlide(slides.viewing + 1);
 $("#slide-close").onclick = () => $("#slide-dlg").close();
@@ -1482,7 +1505,10 @@ async function writeNotes(id, mode, btn, force = false) {
     applyNotes(id, d);
   } catch (x) {
     if (x.status === 409 && mode === "offline" && !force) {
-      if (await confirmDanger("Replace Claude’s notes with offline notes?", x.message, "Replace anyway")) writeNotes(id, mode, btn, true);
+      if (await confirmDanger("Replace Claude’s notes with offline notes?", x.message, "Replace anyway")) {
+        if (btn?.isConnected) btn.textContent = label;  // the nested call takes the label from here and puts it back itself
+        return await writeNotes(id, mode, btn, true);
+      }
     } else toast(x.message, 6000);
   } finally { if (btn?.isConnected) { btn.disabled = false; btn.textContent = label; } }
 }
@@ -1647,13 +1673,14 @@ function qzVerdict(q, r) {
     ${r.explanation ? `<p class="qz-why">${mdInline(cardText(r.explanation), {})}</p>` : ""}
     ${r.t != null ? `<p class="small"><a href="?t=${+r.t}#/lecture/${+qz.id}" target="_blank" rel="noopener">Hear it in the lecture at ${fmtTs(r.t)}<span class="vh"> (opens in a new tab)</span></a></p>` : ""}</div>`;
 }
+const qzNorm = s => String(s ?? "").trim().toLowerCase().replace(/\s+/g, " ");  // = _norm_answer in lecturelab.py
 function qzQuestion(q) {
   const r = qz.res?.[q.id], locked = qz.res || qz.busy ? " disabled" : "", n = q.idx + 1;  // checked or being checked
   const text = `<span class="num" aria-hidden="true">${n}</span><span class="qz-text">${mdInline(cardText(q.question), {})}</span>`;
   const body = q.kind === "mcq"
     ? `<fieldset class="qz-q-body"><legend class="qz-head"><span class="vh">Question ${n}: </span>${text}</legend>
         <div class="qz-choices">${(q.choices || []).map(c => {
-          const right = r && r.answer === c, mine = r && r.your_answer === c;
+          const right = r && qzNorm(r.answer) === qzNorm(c), mine = r && r.your_answer === c;  // marked as the server marks it
           return `<label class="qz-choice${right ? " is-right" : ""}${mine && !right ? " is-wrong" : ""}">
             <input type="radio" name="qz-${esc(q.id)}" value="${esc(c)}"${(r ? mine : qz.draft[q.id] === c) ? " checked" : ""}${locked}>
             <span>${mdInline(cardText(c), {})}${right || mine ? `<span class="qz-tag">${right && mine ? "Your answer, and the right one" : right ? "Right answer" : "Your answer"}</span>` : ""}</span></label>`; }).join("")}</div></fieldset>`
@@ -1824,7 +1851,7 @@ const skeletons = {
     `<p class="seg-sk">${sk("36px", 12)}${sk(w + "%", 18)}</p>`).join("")}`,
 };
 function errorView(key, arg, err) {
-  const what = key === "lecture" || key === "quiz" ? `lecture ${arg}` : key === "course" ? "this course" : "this page";
+  const what = key === "lecture" || key === "quiz" ? `lecture ${arg}` : key === "course" ? `course ${arg}` : "this page";
   const [title, body] = err.status === 404
     ? [what !== "this page" ? `There’s no ${what}` : "This page doesn’t exist", "It may have been deleted, or the link is out of date."]
     : err.status ? [`${what.charAt(0).toUpperCase() + what.slice(1)} didn’t load`, `The server said: ${esc(err.message)}. Try again; if it keeps failing, check server.log.`]
@@ -1854,6 +1881,11 @@ $("#view").addEventListener("click", e => {
 let renderSeq = 0, shown = "";
 async function render() {
   const seq = ++renderSeq, view = $("#view");
+  if (location.hash.includes("?")) {  // #/review?lecture=5 or #/lecture/5?t=10: the query belongs before the hash
+    const [h, q] = location.hash.split(/\?(.*)/s), u = new URL(location.href);
+    new URLSearchParams(q).forEach((v, k) => u.searchParams.set(k, v));
+    u.hash = h; history.replaceState(history.state, "", u); handled = location.href; here = location.hash;
+  }
   let [, route = "", arg] = location.hash.slice(1).split("/");
   if (arg !== undefined && !/^\d+$/.test(arg)) { route = ""; arg = undefined; }  // ids only: never echo the hash into HTML
   if (arg === undefined && (route === "lecture" || route === "course" || route === "quiz")) route = "";  // these need an id
@@ -1981,7 +2013,7 @@ async function loadCanvasItems() {
     <label data-cv="${esc(it.key)}">
       <input type="checkbox" value="${esc(it.key)}" ${["pulled", "queued"].includes(it.status) ? "disabled" : ""}>
       <span class="chip kind">${esc(it.kind)}</span><span style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(it.title || it.key)}<br>
-      <span class="muted">${esc(it.page_url || "")} ${esc((it.created_at || "").slice(0, 10))}</span>
+      <span class="muted">${esc(it.page_url || "")} ${esc(canvasDay(it.created_at))}</span>
       ${it.error ? `<br><span class="err">${esc(it.error)}</span>` : ""}</span>
       <span class="chip ${it.status === "pulled" ? "ok" : it.status === "error" ? "bad" : ""}">${esc(it.status)}</span></label>`).join("")
     : `<p class="muted">Nothing found yet. Press <b>Scan Canvas</b>.</p>`;
@@ -2108,7 +2140,9 @@ async function watchJob(id, quiet = false) {
 
 async function heartbeat() {
   const h$ = $("#health");
-  try { const h = await api("/api/health"); h$.textContent = `Server ok, v${h.version}`; h$.classList.remove("down"); await loadCanvasStatus();
+  try { const h = await api("/api/health"); h$.textContent = `Server ok, v${h.version}`; h$.classList.remove("down");
+    if (!state.courses.length) await loadCourses().catch(() => {});  // the server was down when the page opened
+    await loadCanvasStatus().catch(() => {});  // a Canvas status that fails isn't the server being unreachable
     // A batch started from the CLI isn't a server job, so nothing else re-renders when it finishes: re-check here,
     // and only re-render once it's over and nothing is playing (a re-render rebuilds the player).
     if ($("#tr-queued")?.textContent === "Transcribing…" || $("#tr-auto")?.disabled) {

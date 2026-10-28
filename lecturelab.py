@@ -752,6 +752,14 @@ def run_job_now(job_id: int, wait_retry: bool = True) -> dict:
     while (j := get_job(job_id))["status"] in ("queued", "running"):
         if not wait_retry and j["status"] == "queued" and j["retry_at"]:
             break
+        if j["status"] == "queued":  # it put itself off: once that time comes, run it again here (with no
+            with db() as con:        # server up, nothing else ever would)
+                ok = con.execute("UPDATE jobs SET status='running', owner_pid=?, attempts=attempts+1 WHERE id=? AND "
+                                 "status='queued' AND (retry_at IS NULL OR retry_at<=datetime('now')) RETURNING id",
+                                 (os.getpid(), job_id)).fetchone()
+            if ok:
+                run_job(get_job(job_id))
+                continue
         time.sleep(1)
     return j
 
@@ -784,6 +792,8 @@ SECRET_KEYS = ("passcode",)  # scrubbed from a job's stored payload once it has 
 
 def run_job(job: dict) -> None:
     scrubbed = {k: v for k, v in job["payload"].items() if k not in SECRET_KEYS}
+    if scrubbed.get("url"):  # a Zoom link carries its passcode as ?pwd=
+        scrubbed["url"] = clean_source_url(scrubbed["url"])
     try:
         result = JOB_HANDLERS[job["kind"]](job)
         job_update(job["id"], status="done", result=result or {}, error=None, progress=None, payload=scrubbed)
@@ -981,7 +991,7 @@ def ingest_file(path: Path, *, kind: str, url: str | None = None, course_id: int
     path = Path(path)
     meta = meta or {}
     url = url or str(path)
-    if date and not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
+    if date and not valid_date(date):
         raise ValueError(f"date must be YYYY-MM-DD, got {date!r}")
     if course_id is not None and not find_course(int(course_id)):
         raise ValueError(f"no course with id {course_id}")
@@ -1002,7 +1012,9 @@ def ingest_file(path: Path, *, kind: str, url: str | None = None, course_id: int
     try:
         normalize_audio(path, stage / "audio.flac")
         sha_pcm, fingerprint, duration = pcm_signature(stage / "audio.flac")
-        title = (title or meta.get("title") or probe["title"] or path.stem).strip()
+        # the first one that says something: a title of only spaces would leave the lecture unnamed
+        title = next((" ".join(t.split()) for t in (title, meta.get("title"), probe["title"], path.stem)
+                      if t and t.strip()), "Recording")
         date = date or parse_date(meta.get("upload_date"), meta.get("timestamp"), probe["creation_time"],
                                   path.name, path.parent.name) \
             or datetime.fromtimestamp(path.stat().st_mtime).date().isoformat()
@@ -1236,12 +1248,27 @@ def get_lecture(lecture_id: int) -> dict | None:
     return lec
 
 
+def valid_date(date: str) -> bool:
+    """YYYY-MM-DD and a real day (no 2024-02-30)."""
+    try:
+        return bool(re.fullmatch(r"\d{4}-\d\d-\d\d", date)) and Date.fromisoformat(date) is not None
+    except ValueError:
+        return False
+
+
 def update_lecture(lecture_id: int, **fields) -> dict:
-    allowed = {k: v for k, v in fields.items() if k in ("title", "date", "course_id") and v is not None}
-    if "title" in allowed and not str(allowed["title"]).strip():
-        raise ValueError("title can't be empty")
-    if "date" in allowed and allowed["date"] and not re.fullmatch(r"\d{4}-\d\d-\d\d", allowed["date"]):
-        raise ValueError("date must be YYYY-MM-DD")
+    """Only the fields given change. course_id or date given as None clears it ("No course", no
+    date); a title can't be cleared."""
+    allowed = {k: v for k, v in fields.items() if k in ("title", "date", "course_id")
+               and (v is not None or k != "title")}
+    if "title" in allowed:
+        allowed["title"] = " ".join(str(allowed["title"]).split())  # no stray spaces or line breaks
+        if not allowed["title"]:
+            raise ValueError("title can't be empty")
+    if allowed.get("date") == "":
+        allowed["date"] = None
+    if allowed.get("date") and not valid_date(allowed["date"]):
+        raise ValueError("date must be a real day as YYYY-MM-DD")
     with db() as con:
         if not con.execute("SELECT 1 FROM lectures WHERE id=?", (lecture_id,)).fetchone():
             raise KeyError(lecture_id)
@@ -1321,6 +1348,8 @@ _pending_sizes: dict[str, tuple[int, float]] = {}
 def _still_being_written(f: Path) -> bool:
     """Windows refuses to open a file for writing while another process (a copy, Drive sync)
     still has it open for writing; size+mtime alone miss a copy that stalls between scans."""
+    if not os.access(f, os.W_OK):  # read-only (a view-only Drive file): nothing can be writing it
+        return False
     try:
         with open(f, "ab"):
             return False
@@ -1543,7 +1572,8 @@ class CanvasSession:
             else:
                 raise CanvasError("Canvas kept rate-limiting; try again in a few minutes.")
             if r.status in (403, 404):
-                return [] if paginate else None  # tab hidden by the instructor, or no access: not an error
+                # tab hidden by the instructor, or no access: not an error (and keep the pages already read)
+                return out if paginate else None
             # Signed out: the API answers 401, or bounces to the SSO login page. Anything else that
             # isn't JSON (a 5xx, a maintenance page) is an outage, not an expired session: it must
             # not flip the sticky "needs sign-in" state.
@@ -1937,7 +1967,8 @@ def job_canvas_pull(job: dict) -> dict:
                     cookies = cs.export_cookies(cookie_file)
         if source:
             url, name, meta, jar = source
-            files = [(stream_download(url, tmp / Path(name).name, jar), meta)]
+            # Canvas names can hold ? : " | that Windows refuses (or, for ':', turns into a hidden stream)
+            files = [(stream_download(url, tmp / safe_filename(name, "recording"), jar), meta)]
         else:
             files = download_url(it["url"], tmp, cookiefile=cookies,
                                  progress=lambda m: job_update(job["id"], progress=m))
@@ -1989,6 +2020,8 @@ def canvas_auto_pull() -> list[int]:
 
 def job_canvas_scan(job: dict) -> dict:
     course = find_course(job["payload"]["course_id"])
+    if not course:  # deleted while the scan waited in the queue
+        return {"skipped": "course deleted"}
     if not course["canvas_id"]:
         canvas_courses()  # links LectureLab courses to Canvas ids by course code
         course = find_course(course["id"])
@@ -2073,6 +2106,9 @@ def initial_prompt(lecture: dict) -> str:
 
 def store_transcript(lecture_id: int, result: dict, source: str) -> int:
     """Save a transcript (Colab or local JSON shape) and mark the lecture transcribed."""
+    if not get_lecture(lecture_id):  # deleted while it was being transcribed: nothing to store it on
+        log.info("lecture %s was deleted mid-transcription; its transcript is dropped", lecture_id)
+        return 0
     path = DATA / "transcripts" / f"{lecture_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result), encoding="utf-8")
@@ -2337,7 +2373,8 @@ def transcribe_batch_colab(lectures: list[dict], batch_id: int, progress=None, f
                 except Exception as e:  # one bad file mustn't cost the others (or mask the real error)
                     log.error("batch %s: couldn't store the transcript of lecture %s: %s", batch_id, l["id"], e)
                     continue
-                done.append(l["id"])
+                if get_lecture(l["id"]):  # not deleted mid-batch
+                    done.append(l["id"])
                 with db() as con:
                     con.execute("UPDATE transcribe_batches SET done_ids=? WHERE id=?", (json.dumps(done), batch_id))
 
@@ -2429,10 +2466,14 @@ def job_transcribe(job: dict) -> dict:
     """payload: {lecture_ids?: [...], mode: auto|colab|local}. With no ids, takes every queued lecture.
     auto = Colab, unless units are low or Colab failed twice in a row; then local CPU."""
     mode = job["payload"].get("mode", "auto")
+    if mode == "colab" and not COLAB_ENABLED:  # off means off, even when Colab is asked for by name
+        raise RuntimeError("Colab is turned off on this server (LECTURELAB_COLAB=off); transcribe locally instead.")
     say = lambda m: job_update(job["id"], progress=m)  # noqa: E731
     lock = FileLock(DATA / "transcribe.lock")
     if not lock.acquire():
-        job_update(job["id"], status="queued", retry_at=_sqlnow(120), owner_pid=None)
+        # attempts=0: waiting for another batch isn't a failed try, and a long wait would
+        # otherwise run up attempts until a later crash gets the job given up on
+        job_update(job["id"], status="queued", retry_at=_sqlnow(120), owner_pid=None, attempts=0)
         raise RetryLater("another transcription batch is running")
     stay_awake(True)
     try:
@@ -2454,7 +2495,7 @@ def job_transcribe(job: dict) -> dict:
                             (f"audio file missing: {l['audio_path']}", l["id"]))
             lectures = [l for l in lectures if l not in missing]
             if not lectures:
-                return {"transcribed": [], "note": "nothing waiting"}
+                return {"transcribed": [], "note": "no lectures are waiting"}
             for l in lectures:
                 con.execute("UPDATE lectures SET status='transcribing', error=NULL WHERE id=?", (l["id"],))
             audio_sec = sum(l["duration_sec"] or 0 for l in lectures)
@@ -2498,7 +2539,8 @@ def job_transcribe(job: dict) -> dict:
                     for l in todo:
                         res = transcribe_local(l, progress=say)
                         store_transcript(l["id"], res, f"local-{res['model']}")
-                        done.append(l["id"])
+                        if get_lecture(l["id"]):  # not deleted mid-batch
+                            done.append(l["id"])
                 except Exception as e:
                     finish_batch(batch_id, t0, ok=False, error=str(e)[:2000])  # never leave it looking busy
                     raise
@@ -2906,6 +2948,8 @@ def extract_deck(deck_id: int, progress=None) -> dict:
             raise DeckError("This PDF couldn't be opened; it may be damaged or not really a PDF. "
                             "Export it again and attach that.") from e
         with doc:
+            if doc.needs_pass:  # a deck from Canvas or Drive hasn't been through check_deck_file
+                raise DeckError("This PDF is password-protected. Export a copy without a password and attach that.")
             if doc.page_count == 0:
                 raise DeckError("This PDF has no pages. Export the deck again and attach that.")
             if doc.page_count > MAX_DECK_PAGES:
@@ -3919,8 +3963,11 @@ def claude_call(prompt: str, *, system: str, model: str = NOTES_MODEL, schema: d
     key = hashlib.sha256(json.dumps([model, system, schema, prompt], sort_keys=True).encode()).hexdigest()
     path = CLAUDE_CACHE / f"{key}.json"
     if path.exists():
-        _log_call(lecture_id, kind, model, key, True)
-        return json.loads(path.read_text(encoding="utf-8"))["output"]
+        out = json.loads(path.read_text(encoding="utf-8"))["output"]
+        if not schema or (isinstance(out, dict) and all(k in out for k in schema.get("required", []))):
+            _log_call(lecture_id, kind, model, key, True)
+            return out
+        path.unlink(missing_ok=True)  # cached before answers were checked for shape: ask again
     if (until := meta_get("claude_quota_until", 0)) > time.time():
         raise QuotaExceeded(f"Claude's usage limit is reached; trying again after "
                             f"{datetime.fromtimestamp(until):%H:%M}.", until)
@@ -3946,6 +3993,8 @@ def claude_call(prompt: str, *, system: str, model: str = NOTES_MODEL, schema: d
     try:
         d = json.loads(r.stdout)
     except ValueError:
+        d = None
+    if not isinstance(d, dict):  # not JSON, or JSON that isn't claude's result object
         d = {"is_error": True, "result": ((r.stdout or "")[-400:] + "\n" + (r.stderr or "")[-400:]).strip()}
     msg = str(d.get("result") or "")
     if d.get("is_error") or r.returncode:
@@ -3968,6 +4017,10 @@ def claude_call(prompt: str, *, system: str, model: str = NOTES_MODEL, schema: d
                 out = json.loads(msg)
             except ValueError:
                 raise ClaudeError("Claude's answer wasn't the JSON that was asked for.") from None
+        # never cache an answer of the wrong shape either: "Write the notes again" would replay it forever
+        if out and (not isinstance(out, dict) or any(k not in out for k in schema.get("required", []))):
+            _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"), "wrong shape")
+            raise ClaudeError("Claude's answer wasn't the JSON that was asked for.")
     if not out:  # never cache an empty answer: it would come back empty forever
         _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"), "empty answer")
         raise ClaudeError("Claude's answer was empty.")
@@ -4401,6 +4454,13 @@ def notes_after_slides(lecture_id: int) -> None:
         enqueue_notes(lecture_id)
 
 
+# A notes run that stopped (failed, or Claude signed out) leaves the lecture as it was before it:
+# a lecture that already has notes still has them, so it doesn't drop back to "transcribed".
+_NOTES_STOPPED = ("(CASE WHEN EXISTS (SELECT 1 FROM notes n WHERE n.lecture_id=lectures.id AND n.exported_at IS NOT NULL) "
+                  "THEN 'exported' WHEN EXISTS (SELECT 1 FROM notes n WHERE n.lecture_id=lectures.id) THEN 'notes_done' "
+                  "ELSE 'transcribed' END)")
+
+
 def job_notes(job: dict) -> dict:
     """payload: {lecture_id, mode: claude|offline}."""
     lid = job["payload"]["lecture_id"]
@@ -4416,15 +4476,17 @@ def job_notes(job: dict) -> dict:
         save_notes(lid, notes, mode)
     except QuotaExceeded as e:  # the usage limit, or Claude Code signed out: try again later
         with db() as con:
-            con.execute("UPDATE lectures SET status=? WHERE id=? AND status='notes_running'",
-                        ("transcribed" if isinstance(e, ClaudeUnavailable) else "waiting_quota", lid))
+            if isinstance(e, ClaudeUnavailable):
+                con.execute(f"UPDATE lectures SET status={_NOTES_STOPPED} WHERE id=? AND status='notes_running'", (lid,))
+            else:
+                con.execute("UPDATE lectures SET status='waiting_quota' WHERE id=? AND status='notes_running'", (lid,))
         wait = max(60, int(e.reset_at - time.time()))
         job_update(job["id"], status="queued", retry_at=_sqlnow(wait), owner_pid=None, attempts=0, progress=str(e))
         raise RetryLater(str(e)) from e
     except Exception as e:
         with db() as con:
-            con.execute("UPDATE lectures SET notes_error=?, status=CASE status WHEN 'notes_running' THEN "
-                        "'transcribed' ELSE status END WHERE id=?", (user_error(e, "Writing the notes"), lid))
+            con.execute(f"UPDATE lectures SET notes_error=?, status=CASE status WHEN 'notes_running' THEN "
+                        f"{_NOTES_STOPPED} ELSE status END WHERE id=?", (user_error(e, "Writing the notes"), lid))
         raise
     return {"sections": len(notes["sections"]), "cards": len(notes["cards"]), "quiz": len(notes["quiz"]),
             "removed": notes["removed"], "flagged": notes["flagged"], "mode": mode}
@@ -4611,7 +4673,8 @@ def lecture_link(lecture_id: int, t: float | None = None) -> str:
 
 def _anki_html(s: str) -> str:
     import html
-    return html.escape(s or "").replace("\t", "    ").replace("\n", "<br>")
+    s = (s or "").replace("\r\n", "\n").replace("\r", "\n")  # a stray \r ends the row in Anki's importer
+    return html.escape(s).replace("\t", "    ").replace("\n", "<br>")
 
 
 def anki_tsv(course_id: int | None = None, lecture_id: int | None = None) -> str:
@@ -5147,8 +5210,8 @@ def check_ingest_fields(course_id: int | None, date: str | None) -> None:
     """Reject bad fields up front, not after a 20-minute download."""
     if course_id is not None and not find_course(course_id):
         raise HTTPException(400, f"no course with id {course_id}")
-    if date and not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
-        raise HTTPException(400, "date must be YYYY-MM-DD")
+    if date and not valid_date(date):
+        raise HTTPException(400, "date must be a real day as YYYY-MM-DD")
 
 
 WORKERS: dict[str, Worker] = {}
@@ -5311,7 +5374,7 @@ def create_app():
                 ids = p.get("lecture_ids")
                 j["label"] = f"{'lecture ' + ', '.join(map(str, ids)) if ids else 'everything waiting'} ({p.get('mode', 'auto')})"
             else:
-                j["label"] = (p.get("url") or p.get("title") or p.get("key") or Path(p.get("path", "")).name
+                j["label"] = (clean_source_url(p.get("url")) or p.get("title") or p.get("key") or Path(p.get("path", "")).name
                               or (find_course(p.get("course_id")) or {}).get("code", ""))
         return out
 
@@ -5331,7 +5394,7 @@ def create_app():
         if body.course_id is not None and not find_course(body.course_id):
             raise HTTPException(400, f"no course with id {body.course_id}")
         try:
-            return update_lecture(lecture_id, **body.model_dump())
+            return update_lecture(lecture_id, **body.model_dump(exclude_unset=True))
         except KeyError:
             raise HTTPException(404, "lecture not found")
         except ValueError as e:
@@ -5339,6 +5402,8 @@ def create_app():
 
     @app.post("/api/lectures/{lecture_id}/not-duplicate")
     def api_not_duplicate(lecture_id: int):
+        if not get_lecture(lecture_id):
+            raise HTTPException(404, "lecture not found")
         return release_duplicate(lecture_id)
 
     @app.delete("/api/lectures/{lecture_id}")
@@ -5430,8 +5495,14 @@ def create_app():
             raise HTTPException(400, "mode must be auto, colab or local")
         with db() as con:
             busy = con.execute("SELECT id FROM jobs WHERE kind='transcribe' AND status IN ('queued','running')").fetchone()
+            # the same lectures asked for twice (a double click): one batch, not two Colab sessions
+            same = body.lecture_ids and next(((r["id"], p.get("mode") or "auto") for r in con.execute(
+                "SELECT id, payload FROM jobs WHERE kind='transcribe' AND status IN ('queued','running')")
+                if sorted((p := json.loads(r["payload"])).get("lecture_ids") or []) == sorted(body.lecture_ids)), None)
         if busy and not body.lecture_ids:
             return {"job_id": busy["id"], "note": "a batch is already queued"}
+        if same:  # whatever mode this click asked for, that batch runs as it was queued
+            return {"job_id": same[0], "note": "a batch is already queued", "queued": same[1]}
         jid = enqueue("transcribe", {"lecture_ids": body.lecture_ids, "mode": body.mode})
         wake_workers()
         return {"job_id": jid}

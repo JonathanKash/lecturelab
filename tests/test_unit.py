@@ -2077,3 +2077,269 @@ def test_a_new_recording_makes_the_same_hours_batch(ll, monkeypatch):
     ll.enqueue("ingest", {"path": "inbox:x.mp4"})  # what the inbox scan queues
     out = ll.run_sync()
     assert out["transcribe"] == 1 and ran == ["ingest", "transcribe"]
+
+
+# ---------------------------------------------------------------- sweep regressions
+
+def test_colab_off_refuses_an_explicit_colab_batch(ll, monkeypatch):
+    monkeypatch.setattr(ll, "COLAB_ENABLED", False)
+    monkeypatch.setattr(ll, "transcribe_batch_colab", lambda *a, **k: pytest.fail("Colab is off"))
+    monkeypatch.setattr(ll, "stop_orphan_sessions", lambda *a, **k: pytest.fail("Colab is off"))
+    lid = _lecture(ll, "queued_transcribe")
+    with pytest.raises(RuntimeError, match="LECTURELAB_COLAB=off"):
+        ll.job_transcribe({"id": 1, "payload": {"mode": "colab"}})
+    lec = ll.get_lecture(lid)
+    assert lec["status"] == "queued_transcribe" and lec["transcribe_fails"] == 0
+
+
+def test_waiting_for_another_batch_does_not_use_up_attempts(ll):
+    jid = ll.enqueue("transcribe", {"mode": "local"})
+    held = ll.FileLock(ll.DATA / "transcribe.lock")
+    assert held.acquire()
+    try:
+        for _ in range(4):
+            with ll.db() as con:
+                con.execute("UPDATE jobs SET retry_at=NULL WHERE id=?", (jid,))
+            ll.run_job(ll.claim_job(["transcribe"]))
+    finally:
+        held.release()
+    with ll.db() as con:  # the server dies while it finally runs: it's re-queued, not given up on
+        con.execute("UPDATE jobs SET status='running', owner_pid=999999, attempts=attempts+1 WHERE id=?", (jid,))
+    ll.requeue_orphaned_jobs()
+    assert ll.get_job(jid)["status"] == "queued"
+
+
+def test_a_zoom_passcode_in_the_link_never_shows_in_jobs(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    url = "https://ufl.zoom.us/rec/share/abc?pwd=s3cret&startTime=1"
+    monkeypatch.setattr(ll, "JOB_HANDLERS", {**ll.JOB_HANDLERS, "ingest": lambda job: {"lectures": []}})
+    queued = ll.enqueue("ingest", {"url": url})
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    assert "s3cret" not in c.get("/api/jobs").text  # queued: the label is the link without its passcode
+    ll.run_job(ll.claim_job(["ingest"]))
+    assert "s3cret" not in json.dumps(ll.get_job(queued)["payload"])  # and the stored link loses it after the run
+    assert "s3cret" not in c.get("/api/jobs?active=false").text
+
+
+def test_lecture_details_can_clear_the_course_and_date_and_reject_impossible_dates(ll):
+    from fastapi.testclient import TestClient
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    lid = _lec(ll, "Grammars", ll.find_course("COP4020")["id"], date="2026-10-01")
+    r = c.patch(f"/api/lectures/{lid}", json={"title": "  Parsing\n part 2 ", "date": None, "course_id": None})
+    assert r.status_code == 200 and (r.json()["title"], r.json()["date"], r.json()["course_id"]) == \
+        ("Parsing part 2", None, None)  # what the UI sends for "No course" and an empty date
+    assert c.patch(f"/api/lectures/{lid}", json={"date": "2026-10-02"}).json()["title"] == "Parsing part 2"
+    for bad in ("2024-02-30", "2024-13-01"):
+        assert c.patch(f"/api/lectures/{lid}", json={"date": bad}).status_code == 400
+        assert c.post("/api/recordings", json={"url": "https://x.example/a", "date": bad}).status_code == 400
+    assert c.patch(f"/api/lectures/{lid}", json={"title": " \n "}).status_code == 400
+    assert c.patch(f"/api/lectures/{lid}", json={"title": None}).json()["title"] == "Parsing part 2"
+    assert ll.get_lecture(lid)["date"] == "2026-10-02"
+
+
+def test_asking_to_transcribe_the_same_lecture_twice_makes_one_batch(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(ll, "wake_workers", lambda: None)
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    a, b = _lecture(ll, "error"), _lecture(ll, "error")
+    first = c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "colab"}).json()["job_id"]
+    again = c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "local"}).json()
+    assert again["job_id"] == first and again["queued"] == "colab"  # says how the batch really runs
+    assert c.post("/api/transcribe", json={"lecture_ids": [b], "mode": "auto"}).json()["job_id"] != first
+
+
+def test_a_regenerate_that_stops_keeps_a_lecture_with_notes_ready(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    assert ll.get_lecture(lid)["status"] == "exported"
+    for err in (ll.ClaudeError("Claude Code failed: boom"), ll._claude_down("signed out")):
+        def fail(*a, err=err, **k):
+            raise err
+        monkeypatch.setattr(ll, "generate_notes", fail)
+        with pytest.raises((ll.ClaudeError, ll.RetryLater)):
+            ll.job_notes({"id": ll.enqueue_notes(lid), "payload": {"lecture_id": lid}})
+        assert ll.get_lecture(lid)["status"] == "exported"  # its notes are still there to study from
+    monkeypatch.setattr(ll, "generate_notes", lambda *a, **k: (_ for _ in ()).throw(ll.ClaudeError("boom")))
+    fresh = _notes_lecture(ll)  # a lecture without notes still goes back to transcribed
+    with pytest.raises(ll.ClaudeError):
+        ll.job_notes({"id": ll.enqueue_notes(fresh), "payload": {"lecture_id": fresh}})
+    assert ll.get_lecture(fresh)["status"] == "transcribed"
+
+
+def test_deleting_a_lecture_mid_batch_does_not_fail_the_rest(ll, monkeypatch):
+    a, b = _lecture(ll, "queued_transcribe"), _lecture(ll, "queued_transcribe")
+
+    def fake(lec, progress=None, model_name=None):
+        if lec["id"] == a:
+            ll.delete_lecture(a)  # you delete it while the CPU works on it
+        return {"model": "base", "segments": [{"start": 0, "end": 1, "text": "hi", "words": []}]}
+    monkeypatch.setattr(ll, "transcribe_local", fake)
+    out = ll.job_transcribe({"id": 1, "payload": {"mode": "local"}})
+    assert out["transcribed"] == [b]  # the deleted one isn't reported as transcribed
+    lec = ll.get_lecture(b)
+    assert lec["status"] == "transcribed" and lec["transcribe_fails"] == 0
+    assert not (ll.DATA / "transcripts" / f"{a}.json").exists()
+
+
+def test_a_canvas_file_named_with_windows_reserved_characters_downloads(ll, monkeypatch, noise):
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def httpx_cookies(self):
+            return None
+    monkeypatch.setattr(ll, "canvas_ready", lambda: None)
+    monkeypatch.setattr(ll, "CanvasSession", FakeSession)
+    c = ll.find_course("COP4020")
+    with ll.db() as con:
+        con.execute("INSERT INTO canvas_items(key, course_id, kind, title, url) VALUES "
+                    "('file:7', ?, 'file', 'What is a PL?', 'canvas-file:7')", (c["id"],))
+    for name in ('What is a PL?.wav', 'Lecture 3: TCP.wav', 'a|b "c".wav'):
+        monkeypatch.setattr(ll, "canvas_file_source", lambda fid, name=name: ("https://x/f", name, {"title": "t"}))
+        got = []
+
+        def fake_stream(url, out, jar=None, max_bytes=None):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(noise.read_bytes())  # Windows refuses ? and | here; ':' would make an ADS
+            got.append(out)
+            return out
+        monkeypatch.setattr(ll, "stream_download", fake_stream)
+        out = ll.job_canvas_pull({"id": 6, "payload": {"course_id": c["id"], "key": "file:7"}})
+        assert out["lectures"][0]["lecture_id"] and ":" not in got[0].name
+
+
+def test_a_read_only_file_in_the_inbox_is_still_taken_in(ll, noise, tmp_path, monkeypatch):
+    import shutil
+    import stat
+    monkeypatch.setattr(ll, "LOCAL_INBOX", tmp_path / "inbox")
+    monkeypatch.setenv("LECTURELAB_DRIVE_INBOX", "off")
+    ll.scan_inboxes()
+    f = tmp_path / "inbox" / "COP4020" / "view-only.wav"
+    shutil.copy(noise, f)
+    os.chmod(f, stat.S_IREAD)
+    try:
+        assert len(ll.scan_inboxes(require_stable=False)) == 1
+    finally:
+        os.chmod(f, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_a_password_protected_deck_from_canvas_says_so(ll):
+    import pymupdf as fitz
+    rel = "Slides/test/locked.pdf"
+    plain = _pdf(ll.DATA / "Slides/test/plain.pdf", ["Grammars: BNF"])
+    doc = fitz.open(plain)
+    doc.save(ll.DATA / rel, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="u", owner_pw="o")
+    doc.close()
+    did = _deck(ll, "locked", ll.find_course("COP4020")["id"], path=rel, source="canvas")
+    with pytest.raises(ll.DeckError, match="password-protected"):
+        ll.extract_deck(did)
+
+
+def test_an_answer_of_the_wrong_shape_is_never_cached(ll, monkeypatch):
+    calls = []
+    _fake_claude(ll, monkeypatch, {"outline": {"chapters": []}}, calls)  # no "sections"
+    for _ in range(2):
+        with pytest.raises(ll.ClaudeError, match="wasn't the JSON"):
+            ll.claude_call("p", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
+    assert len(calls) == 2 and not list(ll.CLAUDE_CACHE.glob("*.json"))
+    # one cached before answers were checked for shape is asked again, not replayed forever
+    key = ll.hashlib.sha256(ll.json.dumps([ll.NOTES_MODEL, ll.OUTLINE_SYSTEM, ll.OUTLINE_SCHEMA, "old"],
+                                          sort_keys=True).encode()).hexdigest()
+    ll.CLAUDE_CACHE.mkdir(parents=True, exist_ok=True)
+    (ll.CLAUDE_CACHE / f"{key}.json").write_text(ll.json.dumps({"output": {"chapters": []}}), encoding="utf-8")
+    with pytest.raises(ll.ClaudeError, match="wasn't the JSON"):
+        ll.claude_call("old", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
+    assert len(calls) == 3 and not (ll.CLAUDE_CACHE / f"{key}.json").exists()
+    for stdout in ("null", "[1, 2]", "not json at all"):  # claude printed something that isn't its result object
+        monkeypatch.setattr(ll, "_claude_run", lambda cmd, p, t, out=stdout: subprocess.CompletedProcess(cmd, 0, out, ""))
+        with pytest.raises(ll.ClaudeError, match="Claude Code failed"):
+            ll.claude_call(stdout, system=ll.SECTION_SYSTEM, kind="section")
+
+
+def test_a_title_of_only_spaces_falls_back_to_the_file_name(ll, noise):
+    lid = ll.ingest_file(noise, kind="file", title="   \n ")["lecture_id"]
+    assert ll.get_lecture(lid)["title"] == "noise"
+
+
+def test_the_cli_runs_a_job_again_once_it_stops_waiting(ll, monkeypatch):
+    import threading
+    tries = []
+
+    def flaky(job):
+        tries.append(1)
+        if len(tries) == 1:  # e.g. another batch held the lock: it re-queues itself for a moment later
+            ll.job_update(job["id"], status="queued", retry_at=ll._sqlnow(1), owner_pid=None)
+            raise ll.RetryLater("busy")
+        return {"ok": True}
+    monkeypatch.setitem(ll.JOB_HANDLERS, "flaky", flaky)
+    jid = ll.enqueue("flaky", {})
+    out = {}
+    t = threading.Thread(target=lambda: out.update(ll.run_job_now(jid)), daemon=True)
+    t.start()
+    t.join(15)
+    assert out.get("status") == "done" and len(tries) == 2  # no server: the CLI must not wait forever
+
+
+def test_stop_while_the_supervisor_waits_to_restart_starts_no_new_server(ll, monkeypatch, tmp_path):
+    import cli
+    flag = tmp_path / "supervisor.stop"
+    monkeypatch.setattr(cli, "STOP_FLAG", flag)
+    started = []
+
+    class Crashed:
+        pid = 1
+
+        def wait(self):
+            return 1  # the server died at once
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: started.append(1) or Crashed())
+    monkeypatch.setattr(cli.time, "sleep", lambda s: flag.write_text("stop"))  # `lecturelab stop` meanwhile
+    assert cli.cmd_supervise(None) == 0
+    assert len(started) == 1 and not flag.exists()
+
+
+def test_cli_output_redirected_to_a_file_survives_any_title():
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+    r = subprocess.run([sys.executable, "-c", "import cli; cli._safe_console(); print('Caf\u00e9 \u2615 lecture')"],
+                       capture_output=True, env=env, cwd=os.path.dirname(os.path.dirname(__file__)))
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_canvas_page_that_turns_forbidden_keeps_the_pages_before_it(ll):
+    nxt = '<https://ufl.instructure.com/api/v1/courses/1/modules?page=2&per_page=100>; rel="next"'
+    cs, _ = fake_session(ll, [FakeResponse(200, [{"id": 1}], link=nxt), FakeResponse(403, {"errors": []})])
+    assert cs.get("courses/1/modules") == [{"id": 1}]
+
+
+def test_releasing_a_missing_lecture_is_a_404(ll):
+    from fastapi.testclient import TestClient
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    assert c.post("/api/lectures/999/not-duplicate").status_code == 404
+
+
+def test_a_canvas_scan_of_a_deleted_course_is_skipped(ll):
+    assert ll.job_canvas_scan({"id": 1, "payload": {"course_id": 999}}) == {"skipped": "course deleted"}
+
+
+def test_anki_rows_survive_carriage_returns(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    with ll.db() as con:
+        con.execute("UPDATE cards SET back='one\r\ntwo\rthree' WHERE kind='qa'")
+    lines = ll.anki_tsv(lecture_id=lid).splitlines()[6:]  # splitlines breaks on \r, as Anki's reader does
+    assert len(lines) == 2 and all(len(x.split("\t")) == 6 for x in lines)
+
+
+def test_cli_notes_for_a_lecture_that_does_not_exist_says_so(ll, capsys):
+    import cli
+    assert cli.main(["notes", "999", "--offline"]) == 1
+    assert "no such lecture" in capsys.readouterr().out
+
+
+def test_cli_add_rejects_an_impossible_date_before_downloading(ll, monkeypatch, capsys):
+    import cli
+    jobs = []
+    monkeypatch.setattr(ll, "enqueue", lambda *a, **k: jobs.append(a) or 1)
+    assert cli.main(["add", "https://ufl.zoom.us/rec/share/abc", "--date", "2026-02-30"]) == 2
+    assert "real day" in capsys.readouterr().out
+    assert not jobs  # nothing was queued, so nothing was downloaded
