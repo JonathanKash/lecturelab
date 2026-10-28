@@ -752,6 +752,14 @@ def run_job_now(job_id: int, wait_retry: bool = True) -> dict:
     while (j := get_job(job_id))["status"] in ("queued", "running"):
         if not wait_retry and j["status"] == "queued" and j["retry_at"]:
             break
+        if j["status"] == "queued":  # it put itself off: once that time comes, run it again here (with no
+            with db() as con:        # server up, nothing else ever would)
+                ok = con.execute("UPDATE jobs SET status='running', owner_pid=?, attempts=attempts+1 WHERE id=? AND "
+                                 "status='queued' AND (retry_at IS NULL OR retry_at<=datetime('now')) RETURNING id",
+                                 (os.getpid(), job_id)).fetchone()
+            if ok:
+                run_job(get_job(job_id))
+                continue
         time.sleep(1)
     return j
 

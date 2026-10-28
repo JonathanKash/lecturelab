@@ -2252,3 +2252,22 @@ def test_an_answer_of_the_wrong_shape_is_never_cached(ll, monkeypatch):
 def test_a_title_of_only_spaces_falls_back_to_the_file_name(ll, noise):
     lid = ll.ingest_file(noise, kind="file", title="   \n ")["lecture_id"]
     assert ll.get_lecture(lid)["title"] == "noise"
+
+
+def test_the_cli_runs_a_job_again_once_it_stops_waiting(ll, monkeypatch):
+    import threading
+    tries = []
+
+    def flaky(job):
+        tries.append(1)
+        if len(tries) == 1:  # e.g. another batch held the lock: it re-queues itself for a moment later
+            ll.job_update(job["id"], status="queued", retry_at=ll._sqlnow(1), owner_pid=None)
+            raise ll.RetryLater("busy")
+        return {"ok": True}
+    monkeypatch.setitem(ll.JOB_HANDLERS, "flaky", flaky)
+    jid = ll.enqueue("flaky", {})
+    out = {}
+    t = threading.Thread(target=lambda: out.update(ll.run_job_now(jid)), daemon=True)
+    t.start()
+    t.join(15)
+    assert out.get("status") == "done" and len(tries) == 2  # no server: the CLI must not wait forever
