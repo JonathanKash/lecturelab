@@ -2343,3 +2343,30 @@ def test_cli_add_rejects_an_impossible_date_before_downloading(ll, monkeypatch, 
     assert cli.main(["add", "https://ufl.zoom.us/rec/share/abc", "--date", "2026-02-30"]) == 2
     assert "real day" in capsys.readouterr().out
     assert not jobs  # nothing was queued, so nothing was downloaded
+
+
+def test_deleted_canvas_lecture_can_be_pulled_again_but_not_automatically(ll):
+    cid = ll.find_course("COP4020")["id"]
+    lid = _lecture(ll, "transcribed")
+    with ll.db() as con:
+        con.execute("UPDATE courses SET canvas_id=1, auto_pull=1 WHERE id=?", (cid,))
+        con.execute("INSERT INTO canvas_items(key, course_id, kind, title, url, status, lecture_id) "
+                    "VALUES ('kaltura:1_abcdefgh', ?, 'kaltura', 'Week 3', 'u', 'pulled', ?)", (cid, lid))
+    ll.delete_lecture(lid)
+    with ll.db() as con:
+        it = dict(con.execute("SELECT status, lecture_id FROM canvas_items").fetchone())
+    assert it == {"status": "ignored", "lecture_id": None}
+    assert len(ll.canvas_pull(cid, ["kaltura:1_abcdefgh"])) == 1  # you can pull it again by hand
+
+
+def test_migration_frees_canvas_items_of_deleted_lectures(ll):
+    ll.init_db()
+    cid = ll.find_course("COP4020")["id"]
+    keep = _lecture(ll, "transcribed")
+    with ll.db() as con:
+        con.executemany("INSERT INTO canvas_items(key, course_id, kind, title, url, status, lecture_id) "
+                        "VALUES (?, ?, 'kaltura', 't', 'u', 'pulled', ?)",
+                        [("kaltura:1_gone0000", cid, None), ("kaltura:1_kept0000", cid, keep)])
+        con.execute(ll.MIGRATIONS[9])
+        got = dict(con.execute("SELECT key, status FROM canvas_items").fetchall())
+    assert got == {"kaltura:1_gone0000": "ignored", "kaltura:1_kept0000": "pulled"}

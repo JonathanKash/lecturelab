@@ -460,6 +460,11 @@ MIGRATIONS = [
     ALTER TABLE lectures ADD COLUMN notes_error TEXT;
     ALTER TABLE lectures ADD COLUMN transcribe_fails INTEGER NOT NULL DEFAULT 0;
     """,
+    # 10: Canvas items whose lecture was deleted stayed "pulled", so they couldn't be pulled again
+    """
+    UPDATE canvas_items SET status='ignored', lecture_id=NULL WHERE status='pulled'
+        AND (lecture_id IS NULL OR lecture_id NOT IN (SELECT id FROM lectures));
+    """,
 ]
 
 # Lecture lifecycle. Stages add work for each step; the UI shows these as chips.
@@ -1290,6 +1295,8 @@ def delete_lecture(lecture_id: int) -> None:
         exported = con.execute("SELECT export_paths FROM notes WHERE lecture_id=?", (lecture_id,)).fetchone()
         others = _others_exports(con, lecture_id)
         con.execute("DELETE FROM search WHERE lecture_id=?", (lecture_id,))
+        # Its Canvas item can be pulled again by hand; "ignored" keeps sync's auto-pull from bringing it back.
+        con.execute("UPDATE canvas_items SET status='ignored', lecture_id=NULL WHERE lecture_id=?", (lecture_id,))
         con.execute("DELETE FROM lectures WHERE id=?", (lecture_id,))
     for p in json.loads((exported or [None])[0] or "[]"):
         if p.lower() in others:
