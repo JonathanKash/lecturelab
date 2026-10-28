@@ -567,7 +567,7 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
       </div>
       <div id="add-meta" style="display:grid;gap:8px">
         <div class="form3">
-          <label class="field">Title <input id="add-title" name="title" autocomplete="off" placeholder="From the recording…"></label>
+          <label class="field">Title <input id="add-title" name="title" autocomplete="off" maxlength="300" placeholder="From the recording…"></label>
           <label class="field">Course <select id="add-course" name="course"></select></label>
           <label class="field">Date <input id="add-date" name="date" type="date"></label>
         </div>
@@ -738,7 +738,7 @@ const views = {
       <div class="grid2">${state.courses.map(c => `
         <section data-course="${c.id}" style="display:grid;gap:12px">
           <div class="row" style="flex-wrap:nowrap"><span class="code" style="font-size:var(--t-l)">${esc(c.code)}</span>
-            <input class="course-name" name="course-name" autocomplete="off" value="${esc(c.name)}" aria-label="Course name"></div>
+            <input class="course-name" name="course-name" autocomplete="off" maxlength="300" value="${esc(c.name)}" aria-label="Course name"></div>
           <textarea class="course-vocab" spellcheck="false" aria-label="${esc(c.code)} vocabulary"
             placeholder="One term per line, for example:&#10;Dijkstra&#10;B-tree&#10;malloc">${esc(c.vocabulary)}</textarea>
           <div class="row spread">
@@ -872,7 +872,7 @@ const views = {
             : "Not transcribed yet."}</p>`}</section>
       ${slidesSection(sl, l.id, false)}
       <section class="sec" id="lec-meta"><div class="sec-head"><h3>Details</h3></div><div class="form3">
-        <label class="field">Title <input id="m-title" name="title" autocomplete="off" value="${esc(l.title)}"></label>
+        <label class="field">Title <input id="m-title" name="title" autocomplete="off" maxlength="300" value="${esc(l.title)}"></label>
         <label class="field">Course <select id="m-course" name="course">${courseOptions(l.course_id)}</select></label>
         <label class="field">Date <input id="m-date" name="date" type="date" value="${esc(l.date || "")}"></label></div>
         <div class="row spread" style="margin-top:16px"><span class="small muted">${fmtDur(l.duration_sec)}, ${l.video_path ? "video and audio" : "audio only"}</span>

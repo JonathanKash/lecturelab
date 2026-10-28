@@ -2424,3 +2424,15 @@ def test_lecture_says_which_media_can_play(ll):
     assert ll.get_lecture(lid)["media"] == ["audio"]
     (ll.DATA / "media" / str(lid) / "audio.flac").unlink()
     assert ll.get_lecture(lid)["media"] == []  # the path is still recorded, but there's nothing to play
+
+
+def test_titles_and_course_names_stop_at_300_characters(ll):
+    lid = _lecture(ll, "transcribed")
+    with pytest.raises(ValueError, match="at most 300"):
+        ll.update_lecture(lid, title="x" * 301)
+    assert ll.update_lecture(lid, title="y" * 300)["title"] == "y" * 300
+    cid = ll.find_course("COP4020")["id"]
+    with pytest.raises(ValueError, match="at most 300"):
+        ll.update_course(cid, name="z" * 301)
+    long = ll.clip_title("w" * 5000)  # titles from a recording's metadata are shortened, not refused
+    assert len(long) == 300 and long.endswith("…")

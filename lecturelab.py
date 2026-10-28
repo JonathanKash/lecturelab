@@ -670,6 +670,8 @@ def update_course(course_id: int, name: str | None = None, vocabulary: str | Non
         if name is not None:
             if not name.strip():
                 raise ValueError("course name can't be empty")
+            if len(name.strip()) > TITLE_MAX:
+                raise ValueError(f"course name can be at most {TITLE_MAX} characters")
             con.execute("UPDATE courses SET name=? WHERE id=?", (name.strip(), course_id))
         if vocabulary is not None:
             terms = [t.strip() for t in vocabulary.splitlines() if t.strip()]
@@ -1018,8 +1020,8 @@ def ingest_file(path: Path, *, kind: str, url: str | None = None, course_id: int
         normalize_audio(path, stage / "audio.flac")
         sha_pcm, fingerprint, duration = pcm_signature(stage / "audio.flac")
         # the first one that says something: a title of only spaces would leave the lecture unnamed
-        title = next((" ".join(t.split()) for t in (title, meta.get("title"), probe["title"], path.stem)
-                      if t and t.strip()), "Recording")
+        title = clip_title(next((" ".join(t.split()) for t in (title, meta.get("title"), probe["title"], path.stem)
+                                 if t and t.strip()), "Recording"))
         date = date or parse_date(meta.get("upload_date"), meta.get("timestamp"), probe["creation_time"],
                                   path.name, path.parent.name) \
             or datetime.fromtimestamp(path.stat().st_mtime).date().isoformat()
@@ -1263,6 +1265,13 @@ def valid_date(date: str) -> bool:
         return False
 
 
+TITLE_MAX = 300  # a pasted page of text isn't a title
+
+
+def clip_title(t: str) -> str:
+    return t if len(t) <= TITLE_MAX else t[:TITLE_MAX - 1].rstrip() + "…"
+
+
 def update_lecture(lecture_id: int, **fields) -> dict:
     """Only the fields given change. course_id or date given as None clears it ("No course", no
     date); a title can't be cleared."""
@@ -1272,6 +1281,8 @@ def update_lecture(lecture_id: int, **fields) -> dict:
         allowed["title"] = " ".join(str(allowed["title"]).split())  # no stray spaces or line breaks
         if not allowed["title"]:
             raise ValueError("title can't be empty")
+        if len(allowed["title"]) > TITLE_MAX:
+            raise ValueError(f"title can be at most {TITLE_MAX} characters")
     if allowed.get("date") == "":
         allowed["date"] = None
     if allowed.get("date") and not valid_date(allowed["date"]):
