@@ -2373,7 +2373,8 @@ def transcribe_batch_colab(lectures: list[dict], batch_id: int, progress=None, f
                 except Exception as e:  # one bad file mustn't cost the others (or mask the real error)
                     log.error("batch %s: couldn't store the transcript of lecture %s: %s", batch_id, l["id"], e)
                     continue
-                done.append(l["id"])
+                if get_lecture(l["id"]):  # not deleted mid-batch
+                    done.append(l["id"])
                 with db() as con:
                     con.execute("UPDATE transcribe_batches SET done_ids=? WHERE id=?", (json.dumps(done), batch_id))
 
@@ -2538,7 +2539,8 @@ def job_transcribe(job: dict) -> dict:
                     for l in todo:
                         res = transcribe_local(l, progress=say)
                         store_transcript(l["id"], res, f"local-{res['model']}")
-                        done.append(l["id"])
+                        if get_lecture(l["id"]):  # not deleted mid-batch
+                            done.append(l["id"])
                 except Exception as e:
                     finish_batch(batch_id, t0, ok=False, error=str(e)[:2000])  # never leave it looking busy
                     raise
