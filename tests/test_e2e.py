@@ -123,6 +123,23 @@ def test_course_name_is_rendered_as_text_not_html(page):
     assert page.evaluate("window.pwned") is None
 
 
+def test_layout_survives_elements_injected_into_body(page):
+    # Browser extensions slip their own elements into <body>; the rail and main must keep their cells.
+    page.goto(BASE + "/#/courses")
+    expect(page.locator("#course-nav")).to_contain_text("COP4020")
+    page.evaluate("for (const h of ['0', '40px']) { const d = document.createElement('div'); d.style.height = h; document.body.prepend(d); }")
+    box = lambda sel: page.locator(sel).bounding_box()
+    for width in (1440, 375):
+        page.set_viewport_size({"width": width, "height": 800})
+        aside, main = box("aside"), box("main")
+        assert aside["x"] == 0 and aside["y"] == 0
+        if width > 760:
+            assert main["x"] == aside["width"] and main["y"] == 0
+        else:
+            assert main["x"] == 0 and main["y"] == aside["height"]
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+
+
 def test_api_rejects_foreign_host_and_unknown_course(server):
     req = urllib.request.Request(f"{BASE}/api/health", headers={"Host": "evil.example:8766"})
     with pytest.raises(urllib.error.HTTPError) as e:
