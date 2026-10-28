@@ -2135,3 +2135,13 @@ def test_lecture_details_can_clear_the_course_and_date_and_reject_impossible_dat
     assert c.patch(f"/api/lectures/{lid}", json={"title": " \n "}).status_code == 400
     assert c.patch(f"/api/lectures/{lid}", json={"title": None}).json()["title"] == "Parsing part 2"
     assert ll.get_lecture(lid)["date"] == "2026-10-02"
+
+
+def test_asking_to_transcribe_the_same_lecture_twice_makes_one_batch(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(ll, "wake_workers", lambda: None)
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    a, b = _lecture(ll, "error"), _lecture(ll, "error")
+    first = c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "auto"}).json()["job_id"]
+    assert c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "auto"}).json()["job_id"] == first
+    assert c.post("/api/transcribe", json={"lecture_ids": [b], "mode": "auto"}).json()["job_id"] != first

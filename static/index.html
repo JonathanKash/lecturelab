@@ -947,11 +947,16 @@ const binders = {
     if (v) v.onerror = () => { // e.g. an .mkv the browser can't decode: fall back to the normalized audio
       v.outerHTML = `<audio id="player" controls preload="metadata" src="/api/lectures/${id}/media/audio"></audio>`; bindPlayer(); };
     const startTranscribe = mode => async () => {
-      const { job_id } = await api("/api/transcribe", { method: "POST", body: { lecture_ids: [+id], mode } });
+      const btns = [$("#tr-auto"), $("#tr-local")].filter(Boolean);
+      btns.forEach(b => b.disabled = true);  // a second click must not start a second batch
+      let job_id;
+      try { ({ job_id } = await api("/api/transcribe", { method: "POST", body: { lecture_ids: [+id], mode } })); }
+      catch (e) { btns.forEach(b => b.disabled = false); toast(e.message, 6000); return; }
       toast(mode === "local" ? "Transcribing on this laptop’s CPU…" : "Sending to a Colab GPU…");
       render();
       const j = await watchJob(job_id, true);
-      if (j.status === "done") { toast(`Transcribed (${j.result.mode}${j.result.reason ? ": " + j.result.reason : ""})`, 6000); }
+      if (j.status === "done") { toast(j.result.note ? `Nothing to transcribe: ${j.result.note}`
+        : `Transcribed (${j.result.mode}${j.result.reason ? ": " + j.result.reason : ""})`, 6000); }
       if (location.hash === `#/lecture/${id}`) render();
     };
     if ($("#tr-auto")) $("#tr-auto").onclick = startTranscribe("auto");
