@@ -2247,3 +2247,8 @@ def test_an_answer_of_the_wrong_shape_is_never_cached(ll, monkeypatch):
         monkeypatch.setattr(ll, "_claude_run", lambda cmd, p, t, out=stdout: subprocess.CompletedProcess(cmd, 0, out, ""))
         with pytest.raises(ll.ClaudeError, match="Claude Code failed"):
             ll.claude_call(stdout, system=ll.SECTION_SYSTEM, kind="section")
+
+
+def test_a_title_of_only_spaces_falls_back_to_the_file_name(ll, noise):
+    lid = ll.ingest_file(noise, kind="file", title="   \n ")["lecture_id"]
+    assert ll.get_lecture(lid)["title"] == "noise"

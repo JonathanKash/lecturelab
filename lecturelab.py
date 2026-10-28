@@ -1004,7 +1004,9 @@ def ingest_file(path: Path, *, kind: str, url: str | None = None, course_id: int
     try:
         normalize_audio(path, stage / "audio.flac")
         sha_pcm, fingerprint, duration = pcm_signature(stage / "audio.flac")
-        title = (title or meta.get("title") or probe["title"] or path.stem).strip()
+        # the first one that says something: a title of only spaces would leave the lecture unnamed
+        title = next((" ".join(t.split()) for t in (title, meta.get("title"), probe["title"], path.stem)
+                      if t and t.strip()), "Recording")
         date = date or parse_date(meta.get("upload_date"), meta.get("timestamp"), probe["creation_time"],
                                   path.name, path.parent.name) \
             or datetime.fromtimestamp(path.stat().st_mtime).date().isoformat()
