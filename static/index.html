@@ -1083,7 +1083,9 @@ function setSlides(id, d) {
   clearTimeout(slides.poll); slides.req++;  // anything still in flight is older than this
   Object.assign(slides, { id, data: d, byNo: new Map((d?.slides || []).map(s => [s.no, s])), shown: null, html: "", deferred: false });
 }
-const slideImg = (s, d, cls = "slide-img") => `<button type="button" class="${cls}" data-open-slide="${esc(s.no)}" style="--ar:${slideAr(d)}"
+const slideImg = (s, d, cls = "slide-img") => !s.thumb  // a deck read as text only (a PPTX LibreOffice couldn't render) has no images
+  ? `<div class="${cls} missing" style="--ar:${slideAr(d)}">Slide ${esc(s.no)}${s.title ? `, ${esc(s.title)}` : ""}: text only, no image</div>`
+  : `<button type="button" class="${cls}" data-open-slide="${esc(s.no)}" style="--ar:${slideAr(d)}"
   aria-label="Open slide ${esc(s.no)}: ${esc(slideName(s))}"><img src="${esc(s.thumb)}" alt="" loading="lazy" decoding="async"></button>`;
 const slideMark = (s, d) => `<div class="slide-mark" data-slide="${esc(s.no)}"><span class="no" aria-hidden="true">Slide ${esc(s.no)}</span>
   <div><h4 class="mark-title"><span class="vh">Slide ${esc(s.no)}: </span>${esc(slideName(s))}</h4>${slideImg(s, d, "slide-img mark-thumb")}</div></div>`;
@@ -1285,8 +1287,11 @@ function openSlide(no) {
   slides.viewing = no; setSlideParam(no);
   $("#slide-dlg-h").textContent = slideName(s);
   $("#slide-dlg-n").textContent = `Slide ${s.no} of ${d.deck.pages}`;
-  const img = $("#slide-dlg-img"); img.hidden = false; $("#slide-dlg-missing").hidden = true;
-  img.style.aspectRatio = slideAr(d); img.alt = `Slide ${s.no}: ${slideName(s)}`; img.src = s.image;
+  const img = $("#slide-dlg-img"), missing = $("#slide-dlg-missing");
+  img.hidden = !s.image; missing.hidden = !!s.image;
+  img.style.aspectRatio = slideAr(d); img.alt = `Slide ${s.no}: ${slideName(s)}`;
+  if (s.image) img.src = s.image;
+  else { img.removeAttribute("src"); missing.textContent = "This deck was read as text only, so there’s no image of this slide."; }
   const play = $("#slide-play"), later = (s.ranges || []).slice(1);
   play.disabled = s.first == null;
   play.textContent = s.first == null ? "Not shown in this recording" : `Play from ${fmtTs(s.first)}`;
@@ -1299,7 +1304,8 @@ function openSlide(no) {
     (play.disabled ? ($("#slide-next").disabled ? $("#slide-close") : $("#slide-next")) : play).focus();
   } else if (document.activeElement?.disabled || !$("#slide-dlg").contains(document.activeElement)) $("#slide-close").focus();
 }
-$("#slide-dlg-img").addEventListener("error", e => { if (!e.target.getAttribute("src")) return; e.target.hidden = true; $("#slide-dlg-missing").hidden = false; });
+$("#slide-dlg-img").addEventListener("error", e => { if (!e.target.getAttribute("src")) return; e.target.hidden = true;
+  $("#slide-dlg-missing").textContent = "This slide’s image isn’t available right now. Reload the page in a minute."; $("#slide-dlg-missing").hidden = false; });
 $("#slide-prev").onclick = () => openSlide(slides.viewing - 1);
 $("#slide-next").onclick = () => openSlide(slides.viewing + 1);
 $("#slide-close").onclick = () => $("#slide-dlg").close();
