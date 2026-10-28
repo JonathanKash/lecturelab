@@ -213,6 +213,10 @@ def cmd_notes(args) -> int:
 def _notes(ids: list[int], args) -> int:
     failed = 0
     for lid in ids:
+        if not ll.get_lecture(lid):
+            print(f"lecture {lid}: no such lecture")
+            failed += 1
+            continue
         with ll.db() as con:
             busy = con.execute("SELECT 1 FROM jobs WHERE kind='notes' AND lecture_id=? AND status='running'",
                                (lid,)).fetchone()

@@ -2319,3 +2319,9 @@ def test_anki_rows_survive_carriage_returns(ll, monkeypatch):
         con.execute("UPDATE cards SET back='one\r\ntwo\rthree' WHERE kind='qa'")
     lines = ll.anki_tsv(lecture_id=lid).splitlines()[6:]  # splitlines breaks on \r, as Anki's reader does
     assert len(lines) == 2 and all(len(x.split("\t")) == 6 for x in lines)
+
+
+def test_cli_notes_for_a_lecture_that_does_not_exist_says_so(ll, capsys):
+    import cli
+    assert cli.main(["notes", "999", "--offline"]) == 1
+    assert "no such lecture" in capsys.readouterr().out
