@@ -998,6 +998,29 @@ def test_sweep_empty_batch_deleted_original_and_adding_label(page):
     page.goto(f"{BASE}/#/")
     expect(page.locator('[data-status="ingesting"]').first).to_have_text("adding")
 
+def test_lecture_without_its_recording_says_so(page):
+    lid = 9901  # stubbed: the server says its file is gone
+    lec = {"id": lid, "title": "File gone", "status": "transcribed", "course_id": None, "duration_sec": 600,
+           "audio_path": f"media/{lid}/audio.flac", "video_path": None, "segment_count": 1, "media": [], "sources": []}
+    vid = {**lec, "id": lid + 1, "video_path": f"media/{lid + 1}/original.mp4", "media": ["video", "audio"]}
+    page.route(re.compile(rf"/api/lectures/{lid}$"), lambda r: r.fulfill(json=lec))
+    page.route(re.compile(rf"/api/lectures/{lid + 1}$"), lambda r: r.fulfill(json=vid))
+    page.route(re.compile(rf"/api/lectures/(?:{lid}|{lid + 1})/segments$"), lambda r: r.fulfill(
+        json=[{"idx": 0, "start": 5, "end": 9, "text": "still readable", "slide_no": None}]))
+    page.route(re.compile(rf"/api/lectures/(?:{lid}|{lid + 1})/(slides|notes)$"), lambda r: r.fulfill(status=404, json={"detail": "none"}))
+    page.goto(f"{BASE}/#/lecture/{lid}")
+    expect(page.locator("#no-media")).to_contain_text("isn’t on this laptop any more")
+    expect(page.locator("#player")).to_have_count(0)
+    expect(page.locator("#scrub")).to_have_count(0)  # no tape to drag when nothing can play
+    expect(page.locator(".seg")).to_contain_text("still readable")
+    page.locator(".seg .ts").first.click()  # a timestamp with nothing to play does nothing, quietly
+    expect(page.locator("#no-media")).to_be_visible()
+    # a video the browser can't play falls back to the audio (the stub's files don't exist, so the video fails)
+    page.goto(f"{BASE}/#/lecture/{lid + 1}")
+    expect(page.locator("audio#player")).to_have_count(1)
+    expect(page.locator("#scrub")).to_have_count(1)
+
+
 
 def test_supervisor_restarts_crashed_server(server, page):
     before = wait_health()["pid"]

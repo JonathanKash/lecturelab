@@ -2417,3 +2417,10 @@ def test_quota_reset_reads_the_weekly_limits_day(ll):
     assert datetime.fromtimestamp(ll.quota_reset_at("weekly limit · resets Jan 2, 9am", dec) - 120) == datetime(2027, 1, 2, 9)
     assert ll.quota_reset_at("weekly limit · resets Feb 30, 9am", now) == now + 3600  # nonsense: try again in an hour
     assert ll.quota_reset_at("weekly limit · resets Oct 28, 9am", now) == now + 3600  # earlier today: not a tight loop
+
+
+def test_lecture_says_which_media_can_play(ll):
+    lid = _lecture(ll, "transcribed")
+    assert ll.get_lecture(lid)["media"] == ["audio"]
+    (ll.DATA / "media" / str(lid) / "audio.flac").unlink()
+    assert ll.get_lecture(lid)["media"] == []  # the path is still recorded, but there's nothing to play

@@ -1250,6 +1250,8 @@ def get_lecture(lecture_id: int) -> dict | None:
                                           (lecture_id,)))
         lec["segment_count"] = con.execute("SELECT COUNT(*) FROM segments WHERE lecture_id=?",
                                            (lecture_id,)).fetchone()[0]
+    # what can actually play: a file can be missing (deleted by hand, or still being prepared)
+    lec["media"] = [k for k in ("video", "audio") if lec.get(f"{k}_path") and (DATA / lec[f"{k}_path"]).is_file()]
     return lec
 
 

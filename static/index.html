@@ -812,9 +812,12 @@ const views = {
   },
   async lecture(id) {
     const seq = renderSeq, l = await api(`/api/lectures/${id}`);
-    const media = l.video_path
+    const playable = l.media || [];  // what's on disk: a recording can be missing, or still being prepared
+    const media = playable.includes("video")
       ? `<video id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/video"></video>`
-      : `<audio id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/audio"></audio>`;
+      : playable.includes("audio") ? `<audio id="player" controls preload="metadata" src="/api/lectures/${l.id}/media/audio"></audio>`
+      : `<p class="banner" id="no-media">${l.status === "ingesting" ? "The recording is still being prepared. It plays here once it’s ready."
+        : "The recording’s file isn’t on this laptop any more, so it can’t play here. The transcript and notes still work."}</p>`;
     const dup = l.status === "duplicate" ? `<div class="banner" id="dup-banner">
         ${l.dup_of ? `This looks like the same recording as <a href="#/lecture/${+l.dup_of}">lecture ${+l.dup_of}</a>, so it won’t be processed.`
           : "This looked like the same recording as a lecture that has since been deleted, so it won’t be processed until you release it."}
@@ -854,9 +857,9 @@ const views = {
     return `<div class="page-head"><div><h2 id="lec-title">${esc(l.title)}</h2>
         <p class="sub">${course ? `<span class="code">${esc(course.code)}</span>` : ""}<span>${esc(fmtDate(l.date))}</span>
           <span class="num">${l.duration_sec ? fmtTs(l.duration_sec) : ""}</span></p></div>${chip(l.status)}</div>${dup}${err}
-      <div class="player">${media}</div>
-      ${scrubber(l, segs, notesDone(nt) ? nt.sections : null)}
-      <p class="hint keys">Keys: K plays or pauses, J and L skip 10 seconds. Click the tape or a timestamp to jump there.</p>
+      <div class="player" data-media="${playable.join(" ")}">${media}</div>
+      ${playable.length ? `${scrubber(l, segs, notesDone(nt) ? nt.sections : null)}
+      <p class="hint keys">Keys: K plays or pauses, J and L skip 10 seconds. Click the tape or a timestamp to jump there.</p>` : ""}
       ${tab ? `<div class="tabs" id="lec-tabs" role="tablist" aria-label="Read the lecture as">${tabBtn("notes", "Notes")}${tabBtn("transcript", "Transcript")}</div>
       <section class="sec" id="pane-notes" role="tabpanel" aria-labelledby="tab-notes" ${tab === "notes" ? "" : "hidden"}>${safeNotesPane(nt, { id: l.id, segment_count: segs.length })}</section>` : ""}
       <section class="sec" id="transcript-card" ${tab ? `role="tabpanel" aria-labelledby="tab-transcript" ${tab === "transcript" ? "" : "hidden"}` : ""}><div class="sec-head"><div><h3 ${tab ? 'class="vh"' : ""}>Transcript</h3>
@@ -957,7 +960,7 @@ const binders = {
     if ($("#del-dup")) $("#del-dup").onclick = del;
     if ($("#not-dup")) $("#not-dup").onclick = async () => { await api(`/api/lectures/${id}/not-duplicate`, { method: "POST" }); render(); };
     const v = $("video#player");
-    if (v) v.onerror = () => { // e.g. an .mkv the browser can't decode: fall back to the normalized audio
+    if (v && $(".player").dataset.media.includes("audio")) v.onerror = () => { // e.g. an .mkv the browser can't decode: fall back to the normalized audio
       v.outerHTML = `<audio id="player" controls preload="metadata" src="/api/lectures/${id}/media/audio"></audio>`; bindPlayer(); };
     const startTranscribe = mode => async () => {
       const btns = [$("#tr-auto"), $("#tr-local")].filter(Boolean);
