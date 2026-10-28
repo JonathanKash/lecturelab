@@ -455,6 +455,8 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
 
 @media (pointer: coarse) {
   button, aside nav a, .tabs button { min-height: 44px; }
+  input:not([type="checkbox"]):not([type="radio"]), select { min-height: 44px; }
+  .notes-toc a { display: flex; align-items: center; min-height: 44px; }
   .seg .ts { min-height: 0; }
   /* timestamps and note links stay small in the layout, but take a 44px tall tap */
   .seg .ts, #pane-notes .ts:not(.np > .ts), #pane-notes .link { position: relative; }
