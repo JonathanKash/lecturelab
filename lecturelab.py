@@ -5491,13 +5491,13 @@ def create_app():
         with db() as con:
             busy = con.execute("SELECT id FROM jobs WHERE kind='transcribe' AND status IN ('queued','running')").fetchone()
             # the same lectures asked for twice (a double click): one batch, not two Colab sessions
-            same = body.lecture_ids and next((r["id"] for r in con.execute(
+            same = body.lecture_ids and next(((r["id"], p.get("mode") or "auto") for r in con.execute(
                 "SELECT id, payload FROM jobs WHERE kind='transcribe' AND status IN ('queued','running')")
-                if sorted(json.loads(r["payload"]).get("lecture_ids") or []) == sorted(body.lecture_ids)), None)
+                if sorted((p := json.loads(r["payload"])).get("lecture_ids") or []) == sorted(body.lecture_ids)), None)
         if busy and not body.lecture_ids:
             return {"job_id": busy["id"], "note": "a batch is already queued"}
-        if same:
-            return {"job_id": same, "note": "a batch is already queued"}
+        if same:  # whatever mode this click asked for, that batch runs as it was queued
+            return {"job_id": same[0], "note": "a batch is already queued", "queued": same[1]}
         jid = enqueue("transcribe", {"lecture_ids": body.lecture_ids, "mode": body.mode})
         wake_workers()
         return {"job_id": jid}

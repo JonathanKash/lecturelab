@@ -2142,8 +2142,9 @@ def test_asking_to_transcribe_the_same_lecture_twice_makes_one_batch(ll, monkeyp
     monkeypatch.setattr(ll, "wake_workers", lambda: None)
     c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
     a, b = _lecture(ll, "error"), _lecture(ll, "error")
-    first = c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "auto"}).json()["job_id"]
-    assert c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "auto"}).json()["job_id"] == first
+    first = c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "colab"}).json()["job_id"]
+    again = c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "local"}).json()
+    assert again["job_id"] == first and again["queued"] == "colab"  # says how the batch really runs
     assert c.post("/api/transcribe", json={"lecture_ids": [b], "mode": "auto"}).json()["job_id"] != first
 
 
