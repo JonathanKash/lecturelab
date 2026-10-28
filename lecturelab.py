@@ -2090,6 +2090,9 @@ def initial_prompt(lecture: dict) -> str:
 
 def store_transcript(lecture_id: int, result: dict, source: str) -> int:
     """Save a transcript (Colab or local JSON shape) and mark the lecture transcribed."""
+    if not get_lecture(lecture_id):  # deleted while it was being transcribed: nothing to store it on
+        log.info("lecture %s was deleted mid-transcription; its transcript is dropped", lecture_id)
+        return 0
     path = DATA / "transcripts" / f"{lecture_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result), encoding="utf-8")

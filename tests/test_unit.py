@@ -2162,3 +2162,18 @@ def test_a_regenerate_that_stops_keeps_a_lecture_with_notes_ready(ll, monkeypatc
     with pytest.raises(ll.ClaudeError):
         ll.job_notes({"id": ll.enqueue_notes(fresh), "payload": {"lecture_id": fresh}})
     assert ll.get_lecture(fresh)["status"] == "transcribed"
+
+
+def test_deleting_a_lecture_mid_batch_does_not_fail_the_rest(ll, monkeypatch):
+    a, b = _lecture(ll, "queued_transcribe"), _lecture(ll, "queued_transcribe")
+
+    def fake(lec, progress=None, model_name=None):
+        if lec["id"] == a:
+            ll.delete_lecture(a)  # you delete it while the CPU works on it
+        return {"model": "base", "segments": [{"start": 0, "end": 1, "text": "hi", "words": []}]}
+    monkeypatch.setattr(ll, "transcribe_local", fake)
+    out = ll.job_transcribe({"id": 1, "payload": {"mode": "local"}})
+    assert b in out["transcribed"]
+    lec = ll.get_lecture(b)
+    assert lec["status"] == "transcribed" and lec["transcribe_fails"] == 0
+    assert not (ll.DATA / "transcripts" / f"{a}.json").exists()
