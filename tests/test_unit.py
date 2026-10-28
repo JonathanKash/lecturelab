@@ -2234,3 +2234,16 @@ def test_a_password_protected_deck_from_canvas_says_so(ll):
     did = _deck(ll, "locked", ll.find_course("COP4020")["id"], path=rel, source="canvas")
     with pytest.raises(ll.DeckError, match="password-protected"):
         ll.extract_deck(did)
+
+
+def test_an_answer_of_the_wrong_shape_is_never_cached(ll, monkeypatch):
+    calls = []
+    _fake_claude(ll, monkeypatch, {"outline": {"chapters": []}}, calls)  # no "sections"
+    for _ in range(2):
+        with pytest.raises(ll.ClaudeError, match="wasn't the JSON"):
+            ll.claude_call("p", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
+    assert len(calls) == 2 and not list(ll.CLAUDE_CACHE.glob("*.json"))
+    for stdout in ("null", "[1, 2]", "not json at all"):  # claude printed something that isn't its result object
+        monkeypatch.setattr(ll, "_claude_run", lambda cmd, p, t, out=stdout: subprocess.CompletedProcess(cmd, 0, out, ""))
+        with pytest.raises(ll.ClaudeError, match="Claude Code failed"):
+            ll.claude_call(stdout, system=ll.SECTION_SYSTEM, kind="section")

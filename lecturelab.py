@@ -3975,6 +3975,8 @@ def claude_call(prompt: str, *, system: str, model: str = NOTES_MODEL, schema: d
     try:
         d = json.loads(r.stdout)
     except ValueError:
+        d = None
+    if not isinstance(d, dict):  # not JSON, or JSON that isn't claude's result object
         d = {"is_error": True, "result": ((r.stdout or "")[-400:] + "\n" + (r.stderr or "")[-400:]).strip()}
     msg = str(d.get("result") or "")
     if d.get("is_error") or r.returncode:
@@ -3997,6 +3999,10 @@ def claude_call(prompt: str, *, system: str, model: str = NOTES_MODEL, schema: d
                 out = json.loads(msg)
             except ValueError:
                 raise ClaudeError("Claude's answer wasn't the JSON that was asked for.") from None
+        # never cache an answer of the wrong shape either: "Write the notes again" would replay it forever
+        if out and (not isinstance(out, dict) or any(k not in out for k in schema.get("required", []))):
+            _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"), "wrong shape")
+            raise ClaudeError("Claude's answer wasn't the JSON that was asked for.")
     if not out:  # never cache an empty answer: it would come back empty forever
         _log_call(lecture_id, kind, model, key, False, ms, d.get("usage"), "empty answer")
         raise ClaudeError("Claude's answer was empty.")
