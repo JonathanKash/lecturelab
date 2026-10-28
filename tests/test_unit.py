@@ -2145,3 +2145,20 @@ def test_asking_to_transcribe_the_same_lecture_twice_makes_one_batch(ll, monkeyp
     first = c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "auto"}).json()["job_id"]
     assert c.post("/api/transcribe", json={"lecture_ids": [a], "mode": "auto"}).json()["job_id"] == first
     assert c.post("/api/transcribe", json={"lecture_ids": [b], "mode": "auto"}).json()["job_id"] != first
+
+
+def test_a_regenerate_that_stops_keeps_a_lecture_with_notes_ready(ll, monkeypatch):
+    lid = _notes_done(ll, monkeypatch)
+    assert ll.get_lecture(lid)["status"] == "exported"
+    for err in (ll.ClaudeError("Claude Code failed: boom"), ll._claude_down("signed out")):
+        def fail(*a, err=err, **k):
+            raise err
+        monkeypatch.setattr(ll, "generate_notes", fail)
+        with pytest.raises((ll.ClaudeError, ll.RetryLater)):
+            ll.job_notes({"id": ll.enqueue_notes(lid), "payload": {"lecture_id": lid}})
+        assert ll.get_lecture(lid)["status"] == "exported"  # its notes are still there to study from
+    monkeypatch.setattr(ll, "generate_notes", lambda *a, **k: (_ for _ in ()).throw(ll.ClaudeError("boom")))
+    fresh = _notes_lecture(ll)  # a lecture without notes still goes back to transcribed
+    with pytest.raises(ll.ClaudeError):
+        ll.job_notes({"id": ll.enqueue_notes(fresh), "payload": {"lecture_id": fresh}})
+    assert ll.get_lecture(fresh)["status"] == "transcribed"

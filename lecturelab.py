@@ -4422,6 +4422,13 @@ def notes_after_slides(lecture_id: int) -> None:
         enqueue_notes(lecture_id)
 
 
+# A notes run that stopped (failed, or Claude signed out) leaves the lecture as it was before it:
+# a lecture that already has notes still has them, so it doesn't drop back to "transcribed".
+_NOTES_STOPPED = ("(CASE WHEN EXISTS (SELECT 1 FROM notes n WHERE n.lecture_id=lectures.id AND n.exported_at IS NOT NULL) "
+                  "THEN 'exported' WHEN EXISTS (SELECT 1 FROM notes n WHERE n.lecture_id=lectures.id) THEN 'notes_done' "
+                  "ELSE 'transcribed' END)")
+
+
 def job_notes(job: dict) -> dict:
     """payload: {lecture_id, mode: claude|offline}."""
     lid = job["payload"]["lecture_id"]
@@ -4437,15 +4444,17 @@ def job_notes(job: dict) -> dict:
         save_notes(lid, notes, mode)
     except QuotaExceeded as e:  # the usage limit, or Claude Code signed out: try again later
         with db() as con:
-            con.execute("UPDATE lectures SET status=? WHERE id=? AND status='notes_running'",
-                        ("transcribed" if isinstance(e, ClaudeUnavailable) else "waiting_quota", lid))
+            if isinstance(e, ClaudeUnavailable):
+                con.execute(f"UPDATE lectures SET status={_NOTES_STOPPED} WHERE id=? AND status='notes_running'", (lid,))
+            else:
+                con.execute("UPDATE lectures SET status='waiting_quota' WHERE id=? AND status='notes_running'", (lid,))
         wait = max(60, int(e.reset_at - time.time()))
         job_update(job["id"], status="queued", retry_at=_sqlnow(wait), owner_pid=None, attempts=0, progress=str(e))
         raise RetryLater(str(e)) from e
     except Exception as e:
         with db() as con:
-            con.execute("UPDATE lectures SET notes_error=?, status=CASE status WHEN 'notes_running' THEN "
-                        "'transcribed' ELSE status END WHERE id=?", (user_error(e, "Writing the notes"), lid))
+            con.execute(f"UPDATE lectures SET notes_error=?, status=CASE status WHEN 'notes_running' THEN "
+                        f"{_NOTES_STOPPED} ELSE status END WHERE id=?", (user_error(e, "Writing the notes"), lid))
         raise
     return {"sections": len(notes["sections"]), "cards": len(notes["cards"]), "quiz": len(notes["quiz"]),
             "removed": notes["removed"], "flagged": notes["flagged"], "mode": mode}
