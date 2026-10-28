@@ -2319,6 +2319,27 @@ def finish_batch(batch_id: int, t0: float, ok: bool, error: str | None = None, u
              f" error: {error}" if error else "")
 
 
+def stay_awake(on: bool) -> bool:
+    """Keep Windows from sleeping while a batch runs: in standby the network drops and the Colab VM
+    with it, and the batch hangs until the laptop wakes. This laptop has Modern Standby, which sleeps
+    when the screen turns off, so the screen has to stay on too. Closing the lid still sleeps.
+    Per thread: call on and off from the same one. Never raises: a failure here mustn't strand the
+    transcription lock."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x1, 0x2
+        flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if on else 0)
+        ok = bool(ctypes.windll.kernel32.SetThreadExecutionState(ctypes.c_uint(flags)))
+    except Exception:
+        log.exception("SetThreadExecutionState failed")
+        ok = False
+    if on and not ok:
+        log.warning("could not keep the laptop awake; if it sleeps, this batch's Colab VM is lost")
+    return ok
+
+
 def job_transcribe(job: dict) -> dict:
     """payload: {lecture_ids?: [...], mode: auto|colab|local}. With no ids, takes every queued lecture.
     auto = Colab, unless units are low or Colab failed twice in a row; then local CPU."""
@@ -2328,6 +2349,7 @@ def job_transcribe(job: dict) -> dict:
     if not lock.acquire():
         job_update(job["id"], status="queued", retry_at=_sqlnow(120), owner_pid=None)
         raise RetryLater("another transcription batch is running")
+    stay_awake(True)
     try:
         with db() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -2405,6 +2427,7 @@ def job_transcribe(job: dict) -> dict:
                         con.execute("UPDATE lectures SET status='queued_transcribe' WHERE id=? AND status='transcribing'",
                                     (l["id"],))
     finally:
+        stay_awake(False)
         lock.release()
 
 

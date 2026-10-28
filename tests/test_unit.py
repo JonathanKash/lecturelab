@@ -1,4 +1,5 @@
 import importlib
+import os
 import subprocess
 import sys
 
@@ -1324,3 +1325,27 @@ def test_lines_whisper_left_as_just_punctuation_are_dropped(ll):
                                            {"start": 4, "end": 6, "text": "Clase de hoy"}]}, "colab")
     with ll.db() as con:
         assert [r[0] for r in con.execute("SELECT text FROM segments WHERE lecture_id=? ORDER BY idx", (lid,))]             == ["Next year or .", "Clase de hoy"]
+
+
+def test_a_transcribe_batch_keeps_the_laptop_awake_until_it_ends(ll, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ll, "stay_awake", lambda on: calls.append(on))
+    lid = _lecture(ll, "queued_transcribe")
+    monkeypatch.setattr(ll, "transcribe_batch_colab", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("VM gone")))
+    with pytest.raises(RuntimeError):
+        ll.job_transcribe({"id": 0, "payload": {"lecture_ids": [lid], "mode": "colab"}})
+    assert calls == [True, False]  # released even when the batch fails
+    lock = ll.FileLock(ll.DATA / "transcribe.lock")
+    assert lock.acquire()  # and so is the transcription lock
+    lock.release()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="SetThreadExecutionState is Windows only")
+def test_stay_awake_asks_windows_for_system_and_screen_then_lets_go(ll, monkeypatch):
+    import ctypes
+    sent = []
+    monkeypatch.setattr(ctypes.windll.kernel32, "SetThreadExecutionState", lambda f: sent.append(f.value) or 1)
+    assert ll.stay_awake(True) and ll.stay_awake(False)
+    assert sent == [0x80000003, 0x80000000]
+    monkeypatch.setattr(ctypes.windll.kernel32, "SetThreadExecutionState", lambda f: 1 / 0)
+    assert ll.stay_awake(True) is False  # a failure is logged, never raised
