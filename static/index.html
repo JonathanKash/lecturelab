@@ -2160,11 +2160,16 @@ $("#skip").onclick = () => $("#view").focus();
 let here = location.hash;
 const OWN_PARAMS = { lecture: ["tab", "section", "t"], review: ["course", "lecture"], search: ["q", "course"] };
 history.replaceState({ ...history.state, seen: 1 }, "");
-let handled = location.href;
+let handled = location.href, undoing = null;
 function onNav() {  // Chrome sends only popstate when Back also changes the query, and both events for a plain link: handle each URL once
-  if (location.href === handled) return;
+  if (location.href === handled) { undoing = null; return; }
+  if (location.href === undoing) return;  // the link's second event, while we take it back
   if (dirty.size && !confirm("You have unsaved changes on this page. Leave without saving them?")) {
-    history.replaceState({ seen: 1 }, "", here || "#/"); handled = location.href; return; }
+    // A link added an entry (not yet marked seen): step back off it, so the next Back still leaves this page.
+    // Back or Forward landed on an entry we can't step around, so it's pointed at this page instead.
+    if (!history.state?.seen) { undoing = location.href; history.back(); }
+    else { history.replaceState({ seen: 1 }, "", here || "#/"); handled = location.href; }
+    return; }
   dirty.clear(); here = location.hash;
   if ($("#slide-dlg").open) $("#slide-dlg").close();  // the viewer belongs to the page being left
   // A link carries the old page's ?tab, ?q and so on along; drop them. Back and Forward return to an entry this page already

@@ -1021,6 +1021,21 @@ def test_lecture_without_its_recording_says_so(page):
     expect(page.locator("#scrub")).to_have_count(1)
 
 
+def test_back_after_cancelling_leave_leaves_on_the_first_press(page):
+    page.goto(BASE + "/#/search")
+    page.click('aside a[href="#/courses"]')
+    vocab = page.locator("[data-course]", has_text="COP4533").locator(".course-vocab")
+    vocab.fill("unsaved term")
+    page.once("dialog", lambda d: d.dismiss())
+    page.click('aside a[href="#/"]')
+    expect(page).to_have_url(re.compile(r"#/courses$"))
+    expect(vocab).to_have_value("unsaved term")
+    page.once("dialog", lambda d: d.accept())
+    page.go_back()
+    expect(page).to_have_url(re.compile(r"#/search$"))  # not a second #/courses entry
+    expect(page.locator("#sr-q")).to_be_visible()
+
+
 
 def test_supervisor_restarts_crashed_server(server, page):
     before = wait_health()["pid"]
