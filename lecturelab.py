@@ -983,7 +983,7 @@ def ingest_file(path: Path, *, kind: str, url: str | None = None, course_id: int
     path = Path(path)
     meta = meta or {}
     url = url or str(path)
-    if date and not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
+    if date and not valid_date(date):
         raise ValueError(f"date must be YYYY-MM-DD, got {date!r}")
     if course_id is not None and not find_course(int(course_id)):
         raise ValueError(f"no course with id {course_id}")
@@ -1238,12 +1238,27 @@ def get_lecture(lecture_id: int) -> dict | None:
     return lec
 
 
+def valid_date(date: str) -> bool:
+    """YYYY-MM-DD and a real day (no 2024-02-30)."""
+    try:
+        return bool(re.fullmatch(r"\d{4}-\d\d-\d\d", date)) and Date.fromisoformat(date) is not None
+    except ValueError:
+        return False
+
+
 def update_lecture(lecture_id: int, **fields) -> dict:
-    allowed = {k: v for k, v in fields.items() if k in ("title", "date", "course_id") and v is not None}
-    if "title" in allowed and not str(allowed["title"]).strip():
-        raise ValueError("title can't be empty")
-    if "date" in allowed and allowed["date"] and not re.fullmatch(r"\d{4}-\d\d-\d\d", allowed["date"]):
-        raise ValueError("date must be YYYY-MM-DD")
+    """Only the fields given change. course_id or date given as None clears it ("No course", no
+    date); a title can't be cleared."""
+    allowed = {k: v for k, v in fields.items() if k in ("title", "date", "course_id")
+               and (v is not None or k != "title")}
+    if "title" in allowed:
+        allowed["title"] = " ".join(str(allowed["title"]).split())  # no stray spaces or line breaks
+        if not allowed["title"]:
+            raise ValueError("title can't be empty")
+    if allowed.get("date") == "":
+        allowed["date"] = None
+    if allowed.get("date") and not valid_date(allowed["date"]):
+        raise ValueError("date must be a real day as YYYY-MM-DD")
     with db() as con:
         if not con.execute("SELECT 1 FROM lectures WHERE id=?", (lecture_id,)).fetchone():
             raise KeyError(lecture_id)
@@ -5153,8 +5168,8 @@ def check_ingest_fields(course_id: int | None, date: str | None) -> None:
     """Reject bad fields up front, not after a 20-minute download."""
     if course_id is not None and not find_course(course_id):
         raise HTTPException(400, f"no course with id {course_id}")
-    if date and not re.fullmatch(r"\d{4}-\d\d-\d\d", date):
-        raise HTTPException(400, "date must be YYYY-MM-DD")
+    if date and not valid_date(date):
+        raise HTTPException(400, "date must be a real day as YYYY-MM-DD")
 
 
 WORKERS: dict[str, Worker] = {}
@@ -5337,7 +5352,7 @@ def create_app():
         if body.course_id is not None and not find_course(body.course_id):
             raise HTTPException(400, f"no course with id {body.course_id}")
         try:
-            return update_lecture(lecture_id, **body.model_dump())
+            return update_lecture(lecture_id, **body.model_dump(exclude_unset=True))
         except KeyError:
             raise HTTPException(404, "lecture not found")
         except ValueError as e:

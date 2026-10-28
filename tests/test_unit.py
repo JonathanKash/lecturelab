@@ -2119,3 +2119,19 @@ def test_a_zoom_passcode_in_the_link_never_shows_in_jobs(ll, monkeypatch):
     ll.run_job(ll.claim_job(["ingest"]))
     assert "s3cret" not in json.dumps(ll.get_job(queued)["payload"])  # and the stored link loses it after the run
     assert "s3cret" not in c.get("/api/jobs?active=false").text
+
+
+def test_lecture_details_can_clear_the_course_and_date_and_reject_impossible_dates(ll):
+    from fastapi.testclient import TestClient
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    lid = _lec(ll, "Grammars", ll.find_course("COP4020")["id"], date="2026-10-01")
+    r = c.patch(f"/api/lectures/{lid}", json={"title": "  Parsing\n part 2 ", "date": None, "course_id": None})
+    assert r.status_code == 200 and (r.json()["title"], r.json()["date"], r.json()["course_id"]) == \
+        ("Parsing part 2", None, None)  # what the UI sends for "No course" and an empty date
+    assert c.patch(f"/api/lectures/{lid}", json={"date": "2026-10-02"}).json()["title"] == "Parsing part 2"
+    for bad in ("2024-02-30", "2024-13-01"):
+        assert c.patch(f"/api/lectures/{lid}", json={"date": bad}).status_code == 400
+        assert c.post("/api/recordings", json={"url": "https://x.example/a", "date": bad}).status_code == 400
+    assert c.patch(f"/api/lectures/{lid}", json={"title": " \n "}).status_code == 400
+    assert c.patch(f"/api/lectures/{lid}", json={"title": None}).json()["title"] == "Parsing part 2"
+    assert ll.get_lecture(lid)["date"] == "2026-10-02"
