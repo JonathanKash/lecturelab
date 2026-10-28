@@ -2207,3 +2207,18 @@ def test_a_canvas_file_named_with_windows_reserved_characters_downloads(ll, monk
         monkeypatch.setattr(ll, "stream_download", fake_stream)
         out = ll.job_canvas_pull({"id": 6, "payload": {"course_id": c["id"], "key": "file:7"}})
         assert out["lectures"][0]["lecture_id"] and ":" not in got[0].name
+
+
+def test_a_read_only_file_in_the_inbox_is_still_taken_in(ll, noise, tmp_path, monkeypatch):
+    import shutil
+    import stat
+    monkeypatch.setattr(ll, "LOCAL_INBOX", tmp_path / "inbox")
+    monkeypatch.setenv("LECTURELAB_DRIVE_INBOX", "off")
+    ll.scan_inboxes()
+    f = tmp_path / "inbox" / "COP4020" / "view-only.wav"
+    shutil.copy(noise, f)
+    os.chmod(f, stat.S_IREAD)
+    try:
+        assert len(ll.scan_inboxes(require_stable=False)) == 1
+    finally:
+        os.chmod(f, stat.S_IREAD | stat.S_IWRITE)

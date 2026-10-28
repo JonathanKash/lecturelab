@@ -1338,6 +1338,8 @@ _pending_sizes: dict[str, tuple[int, float]] = {}
 def _still_being_written(f: Path) -> bool:
     """Windows refuses to open a file for writing while another process (a copy, Drive sync)
     still has it open for writing; size+mtime alone miss a copy that stalls between scans."""
+    if not os.access(f, os.W_OK):  # read-only (a view-only Drive file): nothing can be writing it
+        return False
     try:
         with open(f, "ab"):
             return False
