@@ -965,7 +965,7 @@ const binders = {
       const j = await watchJob(job_id, true);
       if (j.status === "done") { toast(j.result.note ? `Nothing to transcribe: ${j.result.note}`
         : `Transcribed (${j.result.mode}${j.result.reason ? ": " + j.result.reason : ""})`, 6000); }
-      if (location.hash === `#/lecture/${id}`) render();
+      if (location.hash === `#/lecture/${id}`) renderKeepingPlace();  // the new transcript, without losing your place
     };
     if ($("#tr-auto")) $("#tr-auto").onclick = startTranscribe("auto");
     if ($("#tr-local")) $("#tr-local").onclick = startTranscribe("local");
