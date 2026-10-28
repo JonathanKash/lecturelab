@@ -2244,6 +2244,14 @@ def test_an_answer_of_the_wrong_shape_is_never_cached(ll, monkeypatch):
         with pytest.raises(ll.ClaudeError, match="wasn't the JSON"):
             ll.claude_call("p", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
     assert len(calls) == 2 and not list(ll.CLAUDE_CACHE.glob("*.json"))
+    # one cached before answers were checked for shape is asked again, not replayed forever
+    key = ll.hashlib.sha256(ll.json.dumps([ll.NOTES_MODEL, ll.OUTLINE_SYSTEM, ll.OUTLINE_SCHEMA, "old"],
+                                          sort_keys=True).encode()).hexdigest()
+    ll.CLAUDE_CACHE.mkdir(parents=True, exist_ok=True)
+    (ll.CLAUDE_CACHE / f"{key}.json").write_text(ll.json.dumps({"output": {"chapters": []}}), encoding="utf-8")
+    with pytest.raises(ll.ClaudeError, match="wasn't the JSON"):
+        ll.claude_call("old", system=ll.OUTLINE_SYSTEM, schema=ll.OUTLINE_SCHEMA, kind="outline")
+    assert len(calls) == 3 and not (ll.CLAUDE_CACHE / f"{key}.json").exists()
     for stdout in ("null", "[1, 2]", "not json at all"):  # claude printed something that isn't its result object
         monkeypatch.setattr(ll, "_claude_run", lambda cmd, p, t, out=stdout: subprocess.CompletedProcess(cmd, 0, out, ""))
         with pytest.raises(ll.ClaudeError, match="Claude Code failed"):

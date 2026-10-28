@@ -3961,8 +3961,11 @@ def claude_call(prompt: str, *, system: str, model: str = NOTES_MODEL, schema: d
     key = hashlib.sha256(json.dumps([model, system, schema, prompt], sort_keys=True).encode()).hexdigest()
     path = CLAUDE_CACHE / f"{key}.json"
     if path.exists():
-        _log_call(lecture_id, kind, model, key, True)
-        return json.loads(path.read_text(encoding="utf-8"))["output"]
+        out = json.loads(path.read_text(encoding="utf-8"))["output"]
+        if not schema or (isinstance(out, dict) and all(k in out for k in schema.get("required", []))):
+            _log_call(lecture_id, kind, model, key, True)
+            return out
+        path.unlink(missing_ok=True)  # cached before answers were checked for shape: ask again
     if (until := meta_get("claude_quota_until", 0)) > time.time():
         raise QuotaExceeded(f"Claude's usage limit is reached; trying again after "
                             f"{datetime.fromtimestamp(until):%H:%M}.", until)
