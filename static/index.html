@@ -1861,6 +1861,11 @@ $("#view").addEventListener("click", e => {
 let renderSeq = 0, shown = "";
 async function render() {
   const seq = ++renderSeq, view = $("#view");
+  if (location.hash.includes("?")) {  // #/review?lecture=5 or #/lecture/5?t=10: the query belongs before the hash
+    const [h, q] = location.hash.split(/\?(.*)/s), u = new URL(location.href);
+    new URLSearchParams(q).forEach((v, k) => u.searchParams.set(k, v));
+    u.hash = h; history.replaceState(history.state, "", u); handled = location.href; here = location.hash;
+  }
   let [, route = "", arg] = location.hash.slice(1).split("/");
   if (arg !== undefined && !/^\d+$/.test(arg)) { route = ""; arg = undefined; }  // ids only: never echo the hash into HTML
   if (arg === undefined && (route === "lecture" || route === "course" || route === "quiz")) route = "";  // these need an id
