@@ -1831,7 +1831,7 @@ const skeletons = {
     `<p class="seg-sk">${sk("36px", 12)}${sk(w + "%", 18)}</p>`).join("")}`,
 };
 function errorView(key, arg, err) {
-  const what = key === "lecture" || key === "quiz" ? `lecture ${arg}` : key === "course" ? "this course" : "this page";
+  const what = key === "lecture" || key === "quiz" ? `lecture ${arg}` : key === "course" ? `course ${arg}` : "this page";
   const [title, body] = err.status === 404
     ? [what !== "this page" ? `There’s no ${what}` : "This page doesn’t exist", "It may have been deleted, or the link is out of date."]
     : err.status ? [`${what.charAt(0).toUpperCase() + what.slice(1)} didn’t load`, `The server said: ${esc(err.message)}. Try again; if it keeps failing, check server.log.`]
