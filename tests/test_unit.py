@@ -2177,3 +2177,33 @@ def test_deleting_a_lecture_mid_batch_does_not_fail_the_rest(ll, monkeypatch):
     lec = ll.get_lecture(b)
     assert lec["status"] == "transcribed" and lec["transcribe_fails"] == 0
     assert not (ll.DATA / "transcripts" / f"{a}.json").exists()
+
+
+def test_a_canvas_file_named_with_windows_reserved_characters_downloads(ll, monkeypatch, noise):
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def httpx_cookies(self):
+            return None
+    monkeypatch.setattr(ll, "canvas_ready", lambda: None)
+    monkeypatch.setattr(ll, "CanvasSession", FakeSession)
+    c = ll.find_course("COP4020")
+    with ll.db() as con:
+        con.execute("INSERT INTO canvas_items(key, course_id, kind, title, url) VALUES "
+                    "('file:7', ?, 'file', 'What is a PL?', 'canvas-file:7')", (c["id"],))
+    for name in ('What is a PL?.wav', 'Lecture 3: TCP.wav', 'a|b "c".wav'):
+        monkeypatch.setattr(ll, "canvas_file_source", lambda fid, name=name: ("https://x/f", name, {"title": "t"}))
+        got = []
+
+        def fake_stream(url, out, jar=None, max_bytes=None):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(noise.read_bytes())  # Windows refuses ? and | here; ':' would make an ADS
+            got.append(out)
+            return out
+        monkeypatch.setattr(ll, "stream_download", fake_stream)
+        out = ll.job_canvas_pull({"id": 6, "payload": {"course_id": c["id"], "key": "file:7"}})
+        assert out["lectures"][0]["lecture_id"] and ":" not in got[0].name

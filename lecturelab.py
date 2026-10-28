@@ -1954,7 +1954,8 @@ def job_canvas_pull(job: dict) -> dict:
                     cookies = cs.export_cookies(cookie_file)
         if source:
             url, name, meta, jar = source
-            files = [(stream_download(url, tmp / Path(name).name, jar), meta)]
+            # Canvas names can hold ? : " | that Windows refuses (or, for ':', turns into a hidden stream)
+            files = [(stream_download(url, tmp / safe_filename(name, "recording"), jar), meta)]
         else:
             files = download_url(it["url"], tmp, cookiefile=cookies,
                                  progress=lambda m: job_update(job["id"], progress=m))
