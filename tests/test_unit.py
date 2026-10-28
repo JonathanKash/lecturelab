@@ -2325,3 +2325,12 @@ def test_cli_notes_for_a_lecture_that_does_not_exist_says_so(ll, capsys):
     import cli
     assert cli.main(["notes", "999", "--offline"]) == 1
     assert "no such lecture" in capsys.readouterr().out
+
+
+def test_cli_add_rejects_an_impossible_date_before_downloading(ll, monkeypatch, capsys):
+    import cli
+    jobs = []
+    monkeypatch.setattr(ll, "enqueue", lambda *a, **k: jobs.append(a) or 1)
+    assert cli.main(["add", "https://ufl.zoom.us/rec/share/abc", "--date", "2026-02-30"]) == 2
+    assert "real day" in capsys.readouterr().out
+    assert not jobs  # nothing was queued, so nothing was downloaded

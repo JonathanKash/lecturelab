@@ -120,6 +120,9 @@ def cmd_add(args) -> int:
     if args.course and not course:
         print(f"unknown course {args.course!r}; known: {', '.join(c['code'] for c in ll.list_courses())}")
         return 2
+    if args.date and not ll.valid_date(args.date):  # up front, not after a 20-minute download
+        print(f"--date {args.date!r} must be a real day as YYYY-MM-DD")
+        return 2
     payload = {"course_id": course and course["id"], "title": args.title, "date": args.date}
     if args.source.lower().startswith(("http://", "https://")):
         payload.update(url=args.source, passcode=args.passcode)
