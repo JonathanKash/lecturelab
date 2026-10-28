@@ -809,7 +809,7 @@ def run_job(job: dict) -> None:
         log.info("job %s %s deferred: %s", job["id"], job["kind"], e)
     except Exception as e:
         log.exception("job %s %s failed", job["id"], job["kind"])
-        job_update(job["id"], status="error", error=str(e)[:4000], progress=None, payload=scrubbed)
+        job_update(job["id"], status="error", error=scrub_urls(str(e))[:4000], progress=None, payload=scrubbed)
 
 
 class Worker(threading.Thread):
@@ -935,6 +935,24 @@ def clean_source_url(url: str | None) -> str | None:
     u = urlsplit(url)
     q = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True) if k.lower() not in ("pwd", "passcode", "token")]
     return urlunsplit(u._replace(query=urlencode(q)))
+
+
+def scrub_urls(text: str) -> str:
+    """Error text can quote the URL it failed on, query and all (Kaltura's ks= and Zoom's pwd= are
+    secrets, and so is a user:password@): keep where it was, drop the rest."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    def one(m):
+        url = m[0].rstrip(".,;:!)]")  # the sentence's punctuation, not the URL's
+        tail = m[0][len(url):]
+        try:
+            u = urlsplit(url)
+            host = u.hostname or ""
+            netloc = (f"[{host}]" if ":" in host else host) + (f":{u.port}" if u.port else "")
+        except ValueError:
+            return url.split("?", 1)[0].split("#", 1)[0] + tail
+        return urlunsplit((u.scheme, netloc, re.sub(r"(?i)/ks/[^/]+", "/ks/…", u.path), "", "")) + tail
+    return re.sub(r"https?://[^\s'\"<>]+", one, text)
 
 
 def add_source(con, lecture_id: int, kind: str, url: str | None) -> None:
@@ -2021,7 +2039,7 @@ def job_canvas_pull(job: dict) -> dict:
     except Exception as e:
         with db() as con:
             con.execute("UPDATE canvas_items SET status='error', error=? WHERE course_id=? AND key=?",
-                        (str(e)[:2000], cid, key))
+                        (scrub_urls(str(e))[:2000], cid, key))
         raise
     finally:
         cookie_file.unlink(missing_ok=True)

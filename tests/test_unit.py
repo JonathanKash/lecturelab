@@ -2436,3 +2436,15 @@ def test_titles_and_course_names_stop_at_300_characters(ll):
         ll.update_course(cid, name="z" * 301)
     long = ll.clip_title("w" * 5000)  # titles from a recording's metadata are shortened, not refused
     assert len(long) == 300 and long.endswith("…")
+
+
+def test_error_text_keeps_where_a_url_was_but_not_its_secrets(ll):
+    msg = ("ERROR: [kaltura] 1_abcdefgh: HTTP 403 for https://cdnapisec.kaltura.com/p/1234567/sp/0/playManifest/"
+           "entryId/1_abcdefgh/ks/djJ8MTIzNDU2N3xTRUNSRVQ/format/url?referrer=x&ks=SECRET2 and "
+           "'https://ufl.zoom.us/rec/share/abc?pwd=hunter2'")
+    out = ll.scrub_urls(msg)
+    assert "SECRET" not in out and "djJ8" not in out and "hunter2" not in out
+    assert "https://cdnapisec.kaltura.com/p/1234567/sp/0/playManifest/entryId/1_abcdefgh/ks/…/format/url" in out
+    assert "'https://ufl.zoom.us/rec/share/abc'" in out and out.startswith("ERROR: [kaltura] 1_abcdefgh: HTTP 403")
+    assert ll.scrub_urls("see http://[::1?ks=SECRET now") == "see http://[::1 now"  # unparseable: cut at the query
+    assert ll.scrub_urls("failed (http://me:pw@h.example:8080/x?pwd=1#f).") == "failed (http://h.example:8080/x)."
