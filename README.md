@@ -27,6 +27,8 @@ py -3.13 -m venv .venv
 
 That registers two scheduled tasks. "LectureLab Server" keeps the app running at http://127.0.0.1:8765 from logon, and "LectureLab Sync" runs every hour.
 
+`.\.venv\Scripts\lecturelab shortcut` puts a LectureLab shortcut on your desktop. It opens the app in its own Chrome or Edge window, and starts the server first if it isn't running.
+
 For Colab transcription, install `google-colab-cli` inside WSL Ubuntu and sign it in to your Google account once. Without it everything still works on your CPU, just slower.
 
 For Canvas, click **Connect Canvas** in the app and sign in yourself. LectureLab keeps its own browser profile in `data/browser-profile/`. It never sees or stores your password, and it only reads from Canvas.

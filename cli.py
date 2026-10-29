@@ -314,8 +314,9 @@ TASK_SYNC = "LectureLab Sync"
 
 
 def _ps(script: str) -> subprocess.CompletedProcess:
+    # NO_WINDOW: from pythonw (the desktop shortcut) a console would flash up otherwise
     return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, creationflags=NO_WINDOW)
 
 
 def _q(path) -> str:
@@ -365,6 +366,70 @@ def cmd_install_tasks(args) -> int:
         print(r.stdout.strip(), r.stderr.strip())
     if r.returncode == 0 and args.start:
         print(_ps(f"Start-ScheduledTask -TaskName '{TASK_SERVER}'; 'started'").stdout.strip())
+    return r.returncode
+
+
+def _app_browsers() -> list[Path]:
+    env = os.environ.get
+    return [Path(env(base) or "-") / sub for base, sub in (
+        ("ProgramFiles", "Google/Chrome/Application/chrome.exe"),
+        ("ProgramFiles(x86)", "Google/Chrome/Application/chrome.exe"),
+        ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe"),
+        ("ProgramFiles(x86)", "Microsoft/Edge/Application/msedge.exe"),
+        ("ProgramFiles", "Microsoft/Edge/Application/msedge.exe"))]
+
+
+def cmd_open(args) -> int:
+    """Open LectureLab in a window of its own, starting the server first if it isn't running.
+    This is what the desktop shortcut runs."""
+    url = f"http://127.0.0.1:{ll.PORT}/"
+    if not _live_server_pid():
+        if _ps(f"Start-ScheduledTask -TaskName '{TASK_SERVER}'").returncode != 0:  # tasks not installed
+            subprocess.Popen([str(Path(sys.executable).with_name("pythonw.exe")), str(Path(__file__).resolve()),
+                              "supervise"], cwd=ll.ROOT, creationflags=NO_WINDOW | subprocess.DETACHED_PROCESS)
+        end = time.time() + 30
+        while time.time() < end and not _live_server_pid():
+            time.sleep(0.5)
+        # still down: open anyway, the page says the server is unreachable and how to start it
+    exe = next((b for b in _app_browsers() if b.is_file()), None)
+    if exe:  # --app: no tabs or address bar, so it looks and switches like an app
+        subprocess.Popen([str(exe), f"--app={url}"], creationflags=NO_WINDOW)
+    else:
+        import webbrowser
+        webbrowser.open(url)
+    return 0
+
+
+def write_icon(path: Path) -> Path:
+    """The favicon's pill (ink with a highlighter end) on a paper tile, so it shows on a dark desktop too."""
+    from PIL import Image, ImageDraw  # Pillow comes with python-pptx
+    img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((8, 8, 248, 248), radius=56, fill="#F6F7F9")
+    d.rounded_rectangle((28, 100, 228, 156), radius=28, fill="#16181D")
+    d.rounded_rectangle((156, 100, 228, 156), radius=28, fill="#FFE45C")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    return path
+
+
+def cmd_shortcut(args) -> int:
+    """Put a LectureLab shortcut on the desktop."""
+    icon = write_icon(ll.DATA / "lecturelab.ico")
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    r = _ps(f"""
+$ErrorActionPreference = 'Stop'
+$path = Join-Path ([Environment]::GetFolderPath('Desktop')) 'LectureLab.lnk'
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
+$s.TargetPath = {_q(pythonw)}
+$s.Arguments = {_q(f'"{Path(__file__).resolve()}" open')}
+$s.WorkingDirectory = {_q(ll.ROOT)}
+$s.IconLocation = {_q(icon)}
+$s.Description = 'Open LectureLab (starts it if it isn''t running)'
+$s.Save()
+$path
+""")
+    print(r.stdout.strip() or r.stderr.strip())
     return r.returncode
 
 
@@ -422,6 +487,9 @@ def main(argv=None) -> int:
     t = sub.add_parser("install-tasks", help="register the logon task and the hourly sync")
     t.add_argument("--start", action="store_true", help="also start it now")
     t.set_defaults(fn=cmd_install_tasks)
+    sub.add_parser("open", help="open the app in its own window, starting the server if needed").set_defaults(
+        fn=cmd_open)
+    sub.add_parser("shortcut", help="put a LectureLab shortcut on the desktop").set_defaults(fn=cmd_shortcut)
     args = p.parse_args(argv)
     return args.fn(args) or 0
 

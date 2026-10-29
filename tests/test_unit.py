@@ -2457,3 +2457,28 @@ def test_colab_status_leaves_colab_alone_when_it_is_off(ll, monkeypatch, capsys)
     monkeypatch.setattr(cli, "ll", ll)
     assert cli.main(["colab-status"]) == 0
     assert "turned off" in capsys.readouterr().out
+
+
+def test_open_starts_the_server_if_needed_then_opens_an_app_window(ll, monkeypatch, tmp_path):
+    import cli
+    up, scripts, launched = iter([None, None, 4242]), [], []
+    monkeypatch.setattr(cli, "_live_server_pid", lambda: next(up, 4242))
+    monkeypatch.setattr(cli, "_ps", lambda s: scripts.append(s) or subprocess.CompletedProcess([], 0))
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"")
+    monkeypatch.setattr(cli, "_app_browsers", lambda: [tmp_path / "missing.exe", chrome])
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda cmd, **k: launched.append(cmd))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli.main(["open"]) == 0
+    assert scripts == [f"Start-ScheduledTask -TaskName '{cli.TASK_SERVER}'"]
+    assert launched == [[str(chrome), f"--app=http://127.0.0.1:{ll.PORT}/"]]
+    scripts.clear(), launched.clear()
+    assert cli.main(["open"]) == 0  # already running: just the window
+    assert not scripts and len(launched) == 1
+
+
+def test_shortcut_icon_has_every_size_windows_asks_for(tmp_path):
+    import cli
+    from PIL import Image
+    with Image.open(cli.write_icon(tmp_path / "x.ico")) as ico:
+        assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= set(ico.info["sizes"])
