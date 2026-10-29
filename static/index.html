@@ -52,6 +52,7 @@ aside { position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right:
 .brand-mark { width: 24px; height: 8px; border-radius: 4px; background: var(--ink); box-shadow: inset -8px 0 0 var(--highlighter); flex: none; }
 .navs { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .nav-head { font-size: var(--t-xs); font-weight: 600; color: var(--pencil); margin: 16px 8px 0; }
+.nav-head:has(+ #course-nav:empty) { display: none; }  /* a fresh install has no courses to head */
 aside nav { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 aside nav a { display: flex; align-items: baseline; gap: 8px; padding: 7px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; min-width: 0; }
 aside nav a:hover { background: var(--hover); }
@@ -117,6 +118,45 @@ label.field { display: grid; gap: 6px; font-size: var(--t-xs); font-weight: 600;
 .grid2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 40px 32px; }
 .form3 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }  /* title on its own row, course + date below */
 .form3 > :first-child { grid-column: 1 / -1; }
+
+/* ---- setup: the path a lecture takes, with the tape bent into a vertical line beside each step (DESIGN.md) */
+.setup { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.setup-page { max-width: 760px; }
+.step { display: grid; grid-template-columns: 4px minmax(0, 1fr); gap: 8px 20px; padding: 24px 0; border-bottom: 1px solid var(--rule); }
+.step-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; min-width: 0; }
+.step-tape { grid-row: 1 / span 2; align-self: stretch; margin: -22px 0; border-radius: 2px; background: var(--rule); position: relative; overflow: hidden; }
+.step-tape[data-tape="done"] { background: var(--ink); }
+.step-tape[data-tape="waiting"] { background: repeating-linear-gradient(180deg, var(--pencil) 0 3px, transparent 3px 7px) center / 2px 100% no-repeat; }
+.step-tape[data-tape="error"] { background: var(--danger); }
+.step-tape[data-tape="active"] { background: color-mix(in srgb, var(--highlighter) 30%, transparent); box-shadow: inset 0 0 0 1px var(--pencil); }
+.step-tape[data-tape="active"]::after { content: ""; position: absolute; inset: 0; background: var(--highlighter); transform-origin: top;
+  animation: sweep-down 1.6s var(--ease-out) infinite alternate; }
+@keyframes sweep-down { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+.step-head { min-width: 0; }
+.step h3 { font: 600 var(--t-m)/1.3 var(--sans); }
+.step-what { margin: 2px 0 0; color: var(--pencil); max-width: 60ch; }
+.step-word { font-size: var(--t-xs); font-weight: 600; white-space: nowrap; padding-top: 3px; }
+.step[data-state="optional"] .step-word { color: var(--pencil); }
+.step[data-state="error"] .step-word { color: var(--danger); }
+.step-body { grid-column: 2; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; justify-items: start; min-width: 0; }
+.step-body > * { max-width: 100%; }
+.step-body p { margin: 0; }
+.step-body .field-error { margin: 0; }
+.step-body p.err { font-weight: 400; }  /* the danger tape and "Fix this" already flag the step; the sentence is the fix */
+.setup-form { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; width: 100%; }
+.setup-form .field { flex: 1 1 240px; min-width: 0; }
+.setup-form .field.code-f { flex: 0 1 160px; }
+.setup-form .field-error { flex-basis: 100%; order: 1; }
+.setup-form input:disabled { opacity: .6; cursor: not-allowed; }
+.setup-courses { list-style: none; margin: 0; padding: 0; width: 100%; }
+.setup-courses li { display: flex; align-items: center; gap: 12px; padding: 4px 0; min-width: 0; }
+.setup-courses .code { flex: none; min-width: 72px; }
+.setup-courses .cname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pencil); }
+.setup-courses button { flex: none; min-height: 32px; padding: 4px 12px; font-size: var(--t-xs); }
+.setup-courses button.danger { color: var(--pencil); }  /* six red buttons at rest would shout; red on hover and focus */
+.setup-courses button.danger:hover:not(:disabled), .setup-courses button.danger:focus-visible { color: var(--danger); }
+.setup-end { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding-top: 32px; }
+.step-sk { display: grid; grid-template-columns: 4px minmax(0, 1fr) auto; gap: 8px 20px; padding: 24px 0; border-bottom: 1px solid var(--rule); }
 
 /* ---- lecture list */
 .list { border-top: 1px solid var(--rule); }
@@ -497,6 +537,8 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
   .qz-choices, .qz-res { margin-left: 0; }
   .qz-q textarea { width: 100%; margin-left: 0; }
   .qz-actions button { flex: 1 1 auto; }
+  .step { gap: 8px 12px; }
+  .setup-form button, .setup-end button { flex: 1 1 100%; }
   .sr-form { grid-template-columns: minmax(0, 1fr); }
   .sr-hit a { grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; padding: 8px; }
   .sr-hit .num { text-align: left; }
@@ -511,7 +553,7 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
   .lec .tape { order: -1; flex-basis: 100%; max-width: none; margin: 4px 0 2px; }
 }
 @media (max-width: 480px) { .form3 { grid-template-columns: 1fr; } }
-@media (pointer: coarse) { button.text, .job-queue summary { min-height: 44px; } }
+@media (pointer: coarse) { button.text, .job-queue summary, .setup-courses button { min-height: 44px; } }
 </style>
 </head>
 <body>
@@ -525,6 +567,7 @@ dialog .head { padding: 24px 24px 0; } dialog .body { padding: 20px 24px; displa
       <a href="#/review" data-route="review" hidden>Review <span class="due" id="due-count"></span></a>
       <a href="#/search" data-route="search" hidden aria-keyshortcuts="/">Search</a>
       <a href="#/courses" data-route="courses">Courses &amp; vocabulary</a>
+      <a href="#/setup" data-route="setup">Setup</a>
     </nav>
     <div class="nav-head" id="courses-head">Courses</div>
     <nav id="course-nav" aria-labelledby="courses-head"></nav>
@@ -610,9 +653,9 @@ async function api(path, opts = {}) {
     body: json ? JSON.stringify(opts.body) : opts.body });
   if (!res.ok) {
     const text = await res.text();
-    let msg = text || res.statusText;
-    try { const d = JSON.parse(text).detail; msg = typeof d === "string" ? d : JSON.stringify(d); } catch {}
-    throw Object.assign(new Error(msg), { status: res.status });
+    let msg = text || res.statusText, detail;
+    try { detail = JSON.parse(text).detail; msg = typeof detail === "string" ? detail : JSON.stringify(detail); } catch {}
+    throw Object.assign(new Error(msg), { status: res.status, detail });
   }
   return res.headers.get("content-type")?.includes("json") ? res.json() : res.text();
 }
@@ -648,6 +691,9 @@ const tapeState = st => st === "queued_transcribe" || st === "ingesting" ? "wait
   : st === "error" ? "error" : st === "duplicate" ? "dup" : "done";
 
 function lectureList(lectures, course = null, inboxes = []) {
+  if (!lectures.length && !course && !state.courses.length) return `<div class="empty"><h3>Set up LectureLab first</h3>
+      <p>Add your first course and check that everything a lecture needs is ready. Then recordings have somewhere to go.</p>
+      <a class="btn" href="#/setup">Go to Setup</a></div>`;
   if (!lectures.length) {
     const folders = inboxes.map(i => `<div class="inbox"><code class="path">${esc(i.path)}\\${course ? esc(course.code) : "&lt;COURSE&gt;"}\\</code>
       <span class="small muted">${i.kind === "drive" ? "Google Drive" : "This laptop"}</span></div>`).join("");
@@ -712,7 +758,148 @@ function colabLine(ts, running) {
   return `<span class="err" title="${esc(why)}">Last Colab batch failed: ${esc(why.length > 70 ? why.slice(0, 70) + "…" : why)}</span>`;
 }
 
+// ---- Setup: the path a lecture takes, top to bottom. Each step's tape segment says whether it's ready (DESIGN.md).
+const su = { st: null, cvList: null, cvAll: 0, pending: null, seq: 0 };
+const STEP_TAPE = { ready: "done", todo: "waiting", optional: "waiting", error: "error", checking: "active" };
+const STEPS = ["courses", "canvas", "recordings", "transcripts", "notes", "saved"];
+const andList = xs => xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`;
+const checkedAt = iso => new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const step = (id, name, what, st, word, body) => `<li class="step" data-step="${id}" data-state="${st}">
+    <span class="step-tape" data-tape="${STEP_TAPE[st]}" aria-hidden="true"></span>
+    <div class="step-top"><div class="step-head"><h3>${name}</h3><p class="step-what">${what}</p></div>
+      <span class="step-word">${word}</span></div>
+    <div class="step-body">${body}</div></li>`;
+const cvListHtml = () => !su.cvList ? "" : su.cvList.length ? `<ul class="setup-courses">${su.cvList.map(c => `<li>
+    ${c.suggested_code ? `<span class="code" translate="no">${esc(c.suggested_code)}</span>` : ""}
+    <span class="cname" title="${esc(c.name)}">${esc(c.name)}${c.term ? ` <span class="small">${esc(c.term)}</span>` : ""}</span>
+    <button type="button" class="ghost" data-cv-add="${+c.canvas_id}" aria-label="Add ${esc(c.name)}">Add</button></li>`).join("")}</ul>`
+  : `<p class="hint">${su.cvAll ? "Every Canvas course you’re enrolled in is already here." : "Canvas lists no current courses for you."}</p>`;
+const setupSteps = {
+  courses(st) {
+    const n = state.courses.length;
+    const list = n ? `<ul class="setup-courses">${state.courses.map(c => `<li>
+      <span class="code" translate="no">${esc(c.code)}</span><span class="cname" title="${esc(c.name)}">${esc(c.name)}</span>
+      <button type="button" class="danger" data-del-course="${+c.id}" data-code="${esc(c.code)}" aria-label="Delete ${esc(c.code)}">Delete</button></li>`).join("")}</ul>` : "";
+    return step("courses", "Courses", "Every recording is filed under one, and its notes are saved in that course’s folder.",
+      n ? "ready" : "todo", n ? "Ready" : "Add one", `${list}
+      <form class="setup-form" id="su-course-form" novalidate>
+        <label class="field code-f">Course code<input id="su-code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40" placeholder="CS101" data-dirty="course"></label>
+        <label class="field">Course name<input id="su-name" name="name" autocomplete="off" maxlength="300" placeholder="Intro to Computer Science" data-dirty="course"></label>
+        <button type="submit" id="su-course-add" class="${n ? "ghost" : ""}">Add course</button></form>
+      <p class="hint">Recordings find their course by its code: in a file name, a title or an inbox folder.</p>
+      ${st.canvas.state === "connected" ? `<button type="button" class="ghost" id="su-cv-courses">Show my Canvas courses</button>
+        <div id="su-cv-list" style="width:100%" aria-live="polite">${cvListHtml()}</div>` : ""}`);
+  },
+  canvas(st) {
+    const c = st.canvas, ov = st.overridden.includes("canvas_base"), on = c.state === "connected", expired = c.state === "needs_signin";
+    const [s, word] = !c.base ? ["optional", "Optional"] : on ? ["ready", "Connected"] : expired ? ["error", "Sign in again"] : ["todo", "Not connected"];
+    return step("canvas", "Canvas", "Pulls recordings and slide decks from your courses. Without it, recordings come from files, links and inbox folders.", s, word, `
+      <form class="setup-form" id="su-canvas-form" novalidate>
+        <label class="field">Your school’s Canvas address<input id="su-canvas" name="canvas_base" inputmode="url" autocomplete="url" spellcheck="false"
+          placeholder="school.instructure.com" value="${esc(c.base || "")}" ${ov ? "disabled" : ""} data-dirty="canvas"></label>
+        <button type="submit" id="su-canvas-save" class="${c.base ? "ghost" : ""}" ${ov ? "disabled" : ""}>Save address</button></form>
+      ${ov ? `<p class="hint">Set by CANVAS_BASE_URL in LectureLab’s environment or .env file, which wins over this field.</p>` : ""}
+      ${c.base ? `<div class="row"><button type="button" id="su-connect" class="${on ? "ghost" : ""}">${on ? "Reconnect" : expired ? "Sign in to Canvas" : "Connect Canvas"}</button>
+        <span class="hint">Opens LectureLab’s own browser window. You sign in there with your school login, so this page never sees your password.</span></div>` : ""}`);
+  },
+  recordings(st) {
+    return step("recordings", "Recordings", "Files, links and Canvas videos come in here and are turned into audio.",
+      st.ffmpeg ? "ready" : "error", st.ffmpeg ? "Ready" : "Fix this", `
+      ${st.ffmpeg ? "" : `<p class="err">ffmpeg isn’t installed, so recordings can’t be read. Run <code>winget install ffmpeg</code> in PowerShell, then press Check again.</p>`}
+      <p class="hint">You can also drop a file into <code class="path">${esc(st.inbox)}\\&lt;COURSE&gt;\\</code></p>
+      <p class="hint">${st.libreoffice ? "PDF and PowerPoint slides both work." : "PDF slides work. PowerPoint slides need LibreOffice: <code>winget install TheDocumentFoundation.LibreOffice</code>"}</p>`);
+  },
+  transcripts(st) {
+    const c = st.colab;
+    return step("transcripts", "Transcripts", "Whisper turns the speech into text, with a time on every line.", "ready", "Ready",
+      `<p class="hint">${!c.enabled ? "On this laptop’s CPU. Colab is turned off on this server."
+        : c.worked ? "On a free Colab GPU, with this laptop’s CPU as the fallback."
+        : "On this laptop’s CPU, which is slower. A free Colab GPU is much faster: the README’s Colab section says how to set it up."}</p>`);
+  },
+  notes(st) {
+    const c = st.claude, lc = c.last_check;
+    const [s, word] = c.off ? ["optional", "Off"] : !c.installed ? ["error", "Fix this"] : !lc ? ["todo", "Not checked"] : lc.ok ? ["ready", "Ready"] : ["error", "Fix this"];
+    return step("notes", "Notes", "Claude Code writes the notes, flashcards and a quiz on your own Claude plan.", s, word,
+      c.off ? `<p class="hint">Turned off on this server (LECTURELAB_CLAUDE=off). Offline notes still work.</p>`
+      : !c.installed ? `<p class="err">Claude Code isn’t installed. Install it from <a href="https://claude.com/claude-code" target="_blank" rel="noopener">claude.com/claude-code</a>,
+          run <code>claude</code> once to sign in to your Claude plan, then press Check again.</p>`
+      : `<div class="row"><button type="button" id="su-claude" class="${lc?.ok ? "ghost" : ""}">Check Claude’s sign-in</button>
+          <span class="hint">Sends Claude one short message, which uses a little of your plan.</span></div>
+        ${lc ? `<p class="${lc.ok ? "" : "err"}">${esc(lc.message)} <span class="muted small">Checked ${esc(checkedAt(lc.at))}</span></p>` : ""}`);
+  },
+  saved(st) {
+    const n = st.notes_dir, ov = st.overridden.includes("notes_dir");
+    return step("saved", "Saved to", "Each lecture’s notes and transcript are saved here as Markdown, one folder per course.",
+      n.writable ? "ready" : "error", n.writable ? "Ready" : "Fix this", `
+      <form class="setup-form" id="su-folder-form" novalidate>
+        <label class="field">Notes folder<input id="su-folder" name="notes_dir" autocomplete="off" spellcheck="false" value="${esc(n.path)}" title="${esc(n.path)}" ${ov ? "disabled" : ""} data-dirty="folder"></label>
+        <button type="submit" id="su-folder-save" class="ghost" ${ov ? "disabled" : ""}>Save folder</button></form>
+      ${ov ? `<p class="hint">Set by LECTURELAB_NOTES_DIR in LectureLab’s environment or .env file, which wins over this field.</p>` : ""}
+      ${n.writable ? "" : `<p class="err">LectureLab can’t write to this folder. Pick one in your Documents.</p>`}`);
+  },
+};
+function setupEnd(st) {
+  const missing = [!state.courses.length && "add a course", !st.ffmpeg && "install ffmpeg",
+    !st.notes_dir.writable && "pick a notes folder LectureLab can write to"].filter(Boolean);
+  return `<div class="setup-end" id="setup-end"><button type="button" id="su-done" ${missing.length ? 'disabled aria-describedby="su-missing"' : ""}>${
+    st.lectures ? "Go to the Library" : "Add your first recording"}</button>
+    ${missing.length ? `<p class="hint" id="su-missing">First ${andList(missing)}.</p>` : ""}</div>`;
+}
+// Redraws every step in place: fields with unsaved typing keep it, and focus comes back to the same control.
+function drawSetup(st) {
+  if (!$("#setup")) return;  // you left the page while a request was out
+  su.st = st;
+  const keep = $$("#setup-wrap input").filter(i => dirty.has(i.dataset.dirty)).map(i => [i.id, i.value]), act = document.activeElement, f = act?.id;
+  const sel = act?.matches?.("input") ? [act.selectionStart, act.selectionEnd] : null;
+  $("#setup").innerHTML = STEPS.map(k => setupSteps[k](st)).join("");
+  $("#setup-end").outerHTML = setupEnd(st);
+  keep.forEach(([id, v]) => { const el = document.getElementById(id); if (el) el.value = v; });
+  const back = f && document.getElementById(f);
+  if (back && !back.disabled && document.activeElement === document.body) {
+    back.focus({ preventScroll: true });
+    if (sel && back.matches("input")) back.setSelectionRange(...sel);
+  }
+}
+async function refreshSetup() {  // overlapping refreshes (a save during a Claude check): only the newest is drawn
+  const n = ++su.seq; await loadCourses(); const st = await api("/api/setup");
+  if (n === su.seq) drawSetup(st);
+}
+const refreshFailed = () => toast("That worked, but this page didn’t refresh. Press Check again.", 5000);
+function clearSetupErrors() {
+  $$("#setup-wrap .field-error").forEach(e => e.remove());
+  $$("#setup-wrap [aria-invalid]").forEach(e => { e.removeAttribute("aria-invalid"); e.removeAttribute("aria-describedby"); });
+}
+function setupError(el, msg) {  // under the field, which takes focus
+  if (!el?.isConnected) return;  // you left the page while the request was out
+  clearSetupErrors();
+  el.setAttribute("aria-invalid", "true"); el.setAttribute("aria-describedby", `${el.id}-err`);
+  (el.closest("label.field") || el).insertAdjacentHTML("afterend", `<p class="field-error" id="${el.id}-err">${esc(msg)}</p>`);
+  el.focus();
+}
+function stepError(btn, msg) {  // a button's failure goes at the end of its step; focus stays on the button
+  if (!btn?.isConnected) return;
+  clearSetupErrors();
+  btn.closest(".step-body")?.insertAdjacentHTML("beforeend", `<p class="field-error" role="alert">${esc(msg)}</p>`);
+}
+async function busy(btn, label, work, onError) {
+  const was = btn.textContent, had = document.activeElement === btn;
+  btn.disabled = true; btn.textContent = label;
+  try { await work(); } catch (err) { onError(err); }
+  finally {
+    if (btn.isConnected) { btn.disabled = false; btn.textContent = was; }
+    const now = btn.isConnected ? btn : btn.id && document.getElementById(btn.id);
+    if (had && now && !now.disabled && document.activeElement === document.body) now.focus({ preventScroll: true });
+  }
+}
+
 const views = {
+  async setup() {
+    const [st] = await Promise.all([api("/api/setup"), loadCourses()]);
+    Object.assign(su, { st, cvList: null, pending: null });
+    return `<div class="setup-page"><div class="page-head"><h2>Set up LectureLab</h2><button type="button" class="ghost" id="su-recheck">Check again</button></div>
+      <p class="lede">Every lecture goes down this list: filed under a course, brought in, transcribed, written up and saved. A solid line beside a step means it’s ready.</p>
+      <div id="setup-wrap"><ol class="setup" id="setup" aria-label="What a lecture needs">${STEPS.map(k => setupSteps[k](st)).join("")}</ol>${setupEnd(st)}</div></div>`;
+  },
   async library() {
     await loadLectures();
     const [inboxes, ts, jobs] = await Promise.all([api("/api/inboxes"), api("/api/transcribe/status"), api("/api/jobs")]);
@@ -730,9 +917,8 @@ const views = {
   },
   async courses() {
     if (!state.courses.length) return `<div class="page-head"><h2>Courses &amp; vocabulary</h2></div>
-      <div class="empty"><h3>No courses found</h3><p>The server creates your courses the first time it starts.
-        Check server.log for a database error, then restart it with <code>lecturelab serve</code>.</p>
-        <button type="button" data-retry>Try again</button></div>`;
+      <div class="empty"><h3>No courses yet</h3><p>Add your courses on the Setup page. Each one then gets its vocabulary here.</p>
+        <a class="btn" href="#/setup">Go to Setup</a></div>`;
     return `<div class="page-head"><h2>Courses &amp; vocabulary</h2></div>
       <p class="lede">One term per line: names, jargon, function names. These are fed to Whisper and to the note prompts so technical terms come out right.</p>
       <div class="grid2">${state.courses.map(c => `
@@ -884,6 +1070,84 @@ const views = {
 };
 
 const binders = {
+  setup() {
+    const wrap = $("#setup-wrap");
+    $("#su-recheck").onclick = e => busy(e.currentTarget, "Checking…", async () => { await refreshSetup(); toast("Checked again"); },
+      err => toast(`The check didn’t finish: ${err.message}`, 5000));
+    wrap.addEventListener("input", e => { if (e.target.matches("[aria-invalid]")) clearSetupErrors(); });
+    wrap.onsubmit = async e => {
+      e.preventDefault();
+      const f = e.target, btn = $("button[type=submit]", f);
+      clearSetupErrors();
+      if (f.id === "su-course-form") {
+        const code = $("#su-code").value.trim(), name = $("#su-name").value.trim();
+        if (!code) return setupError($("#su-code"), "Type the course’s code, like CS101.");
+        return busy(btn, "Adding…", async () => {
+          const c = await api("/api/courses", { method: "POST", body: { code, name,
+            canvas_id: su.pending && su.pending.name === name ? su.pending.id : null } });
+          su.pending = null; dirty.delete("course"); toast(`Added ${c.code}`);
+          if (su.cvList) su.cvList = su.cvList.filter(x => x.canvas_id !== c.canvas_id);
+          await refreshSetup().catch(refreshFailed); $("#su-code")?.focus();
+        }, err => setupError(/\bname\b/i.test(err.message) ? $("#su-name") : $("#su-code"), err.message));
+      }
+      const [key, input, done] = f.id === "su-canvas-form" ? ["canvas_base", $("#su-canvas"), "Address saved"] : ["notes_dir", $("#su-folder"), "Folder saved"];
+      return busy(btn, "Saving…", async () => {
+        const st = await api("/api/settings", { method: "PUT", body: { [key]: input.value } });
+        dirty.delete(input.dataset.dirty); toast(done);
+        if (key === "canvas_base") su.cvList = null;  // another school's courses
+        su.seq++; await loadCourses().catch(() => {}); drawSetup(st);
+      }, err => setupError(input, err.detail?.fields?.[key] || err.message));
+    };
+    wrap.onclick = async e => {
+      const t = e.target.closest("button"); if (!t || t.disabled || t.type === "submit") return;
+      if (t.id === "su-done") { const first = !su.st.lectures; location.hash = "#/"; if (first) openAdd(); }
+      else if (t.dataset.delCourse) {
+        const code = t.dataset.code;
+        if (!await confirmDanger(`Delete ${code}?`, `${code} and its slide decks are removed from LectureLab. A course that still has lectures can’t be deleted.`, "Delete course")) return;
+        try { await api(`/api/courses/${t.dataset.delCourse}`, { method: "DELETE" }); }
+        catch (err) { stepError(t, err.message); if (t.isConnected) t.focus(); return; }
+        toast(`Deleted ${code}`); su.cvList = null;
+        await refreshSetup().catch(refreshFailed);
+        ($("#setup [data-del-course]") || $("#su-code"))?.focus();
+      }
+      else if (t.id === "su-claude") {
+        const li = t.closest(".step"), tape = $(".step-tape", li), word = $(".step-word", li);
+        const before = [li.dataset.state, tape.dataset.tape, word.textContent];
+        li.dataset.state = "checking"; tape.dataset.tape = "active"; word.textContent = "Checking…";
+        let fail;
+        await busy(t, "Checking…", async () => { const r = await api("/api/setup/check-claude", { method: "POST" }); toast(`Checked: ${r.message}`, 6000); },
+          err => { fail = err.message; });
+        // Redraw with the new answer; if that fails too, at least stop saying "Checking…"
+        if (!await refreshSetup().then(() => true, () => false) && li.isConnected) [li.dataset.state, tape.dataset.tape, word.textContent] = before;
+        const again = $("#su-claude");
+        if (again && fail) stepError(again, `The check didn’t finish: ${fail}`);
+        again?.focus();
+      }
+      else if (t.id === "su-connect") {
+        await busy(t, "Browser open…", async () => { await connectCanvas(); await refreshSetup(); }, err => stepError(t, err.message));
+      }
+      else if (t.id === "su-cv-courses") {
+        await busy(t, "Loading your Canvas courses…", async () => {
+          const all = await api("/api/canvas/courses", { method: "POST" });
+          su.cvAll = all.length; su.cvList = all.filter(c => !c.course_id);
+          $("#su-cv-list").innerHTML = cvListHtml();
+        }, err => stepError(t, err.message));
+      }
+      else if (t.dataset.cvAdd) {
+        const c = su.cvList?.find(c => String(c.canvas_id) === t.dataset.cvAdd); if (!c) return;
+        if (!c.suggested_code) {  // nothing in its name looks like a code: you give it one
+          if (!$("#su-name").value.trim()) $("#su-name").value = c.name;
+          su.pending = { id: c.canvas_id, name: $("#su-name").value.trim() }; dirty.add("course");
+          return setupError($("#su-code"), `Give ${c.name} a short code, like CS101, then press Add course.`);
+        }
+        await busy(t, "Adding…", async () => {
+          const made = await api("/api/courses", { method: "POST", body: { code: c.suggested_code, name: c.name, canvas_id: c.canvas_id } });
+          toast(`Added ${made.code}`); su.cvList = su.cvList.filter(x => x !== c); await refreshSetup().catch(refreshFailed);
+          ($("#su-cv-list [data-cv-add]") || $("#su-code"))?.focus();
+        }, err => stepError(t, err.message));
+      }
+    };
+  },
   quiz() {
     if (qz.next) Object.assign(qz, qz.next, { res: null, marks: {}, saved: null, draft: {}, busy: null });
     qz.next = null; qz.gen++;  // anything still in flight belongs to the copy of the page that's gone
@@ -1770,7 +2034,8 @@ function qzAgain() {  // after a save: a clean quiz. Before one: your answers co
 async function refreshDue() {  // the rail's Review link: hidden on a server without flashcards, with the count due
   const a = $('#nav a[data-route="review"]'), s = $('#nav a[data-route="search"]'); if (!a) return;
   try { const d = await api("/api/review?limit=1"); const n = (+d.due || 0) + (+d.new || 0);
-    a.hidden = false; s.hidden = false; $("#due-count").textContent = n ? n : ""; a.setAttribute("aria-label", n ? `Review, ${n} due` : "Review"); }
+    const appeared = a.hidden; a.hidden = false; s.hidden = false; $("#due-count").textContent = n ? n : ""; a.setAttribute("aria-label", n ? `Review, ${n} due` : "Review");
+    if (appeared) showCurrentNav(); }  // two more links can push the current page out of the phone's row
   catch (x) { if (x.status === 404) a.hidden = s.hidden = true; }
 }
 
@@ -1848,6 +2113,8 @@ const listSkeleton = () => `<div class="page-head">${sk("200px", 38)}</div><div 
   `<div class="lec-sk">${sk(w + "%", 20)}${sk("48px")}<span class="meta">${sk("64px")}${sk(w * 3 + "px", 8)}</span></div>`).join("")}</div>`;
 const skeletons = {
   library: listSkeleton, course: listSkeleton,
+  setup: () => `<div class="setup-page"><div class="page-head">${sk("280px", 38)}</div><div style="margin:-12px 0 32px">${sk("min(60ch, 100%)")}</div>
+    <div class="setup">${[60, 45, 70, 50, 65, 55].map(w => `<div class="step-sk"><span></span><div style="display:grid;gap:8px">${sk("120px", 20)}${sk(w + "%")}</div>${sk("48px")}</div>`).join("")}</div></div>`,
   quiz: () => `<div class="page-head">${sk("200px", 38)}</div>${[1, 2, 3].map(() =>
     `<div style="display:grid;gap:10px;padding:24px 0;max-width:68ch">${sk("85%", 22)}${sk("60%")}${sk("60%")}${sk("60%")}</div>`).join("")}`,
   search: () => `<div class="page-head">${sk("200px", 38)}</div>${sk("100%", 44)}${[1, 2, 3].map(() =>
@@ -1876,18 +2143,24 @@ function confirmDanger(title, msg, action) {
   d.returnValue = ""; d.showModal();
   return new Promise(r => d.addEventListener("close", () => r(d.returnValue === "ok"), { once: true }));
 }
-const dirty = new Set();  // unsaved edits on the current view: "meta" or "course-<id>"
+const dirty = new Set();  // unsaved edits on the current view: "meta", "course-<id>", or a setup field's data-dirty
 $("#view").addEventListener("input", e => {
   const card = e.target.closest("[data-course]");
   if (card) { dirty.add(`course-${card.dataset.course}`); $(".save-course", card).classList.remove("ghost");
     if (e.target.matches(".course-vocab")) $(".term-count", card).textContent = termCount(e.target.value); }
   else if (e.target.closest("#lec-meta")) dirty.add("meta");
+  else if (e.target.dataset.dirty) dirty.add(e.target.dataset.dirty);
 });
 $("#view").addEventListener("click", e => {
   if (e.target.closest("[data-action=add]")) openAdd();
   if (e.target.closest("[data-retry]")) { shown = ""; loadCourses().catch(() => {}).then(render); }
 });
 
+function showCurrentNav() {  // phones: the rail is one scrolling row, so bring the current page into it
+  const navs = $(".navs"), cur = $('aside nav a[aria-current="page"]');
+  if (navs && cur && navs.scrollWidth > navs.clientWidth) { const a = cur.getBoundingClientRect(), n = navs.getBoundingClientRect();
+    if (a.left < n.left || a.right > n.right) navs.scrollLeft += a.left - n.left - 16; }
+}
 let renderSeq = 0, shown = "";
 async function render() {
   const seq = ++renderSeq, view = $("#view");
@@ -1902,9 +2175,7 @@ async function render() {
   const key = Object.hasOwn(views, route) ? route : "library", where = `${key}/${arg ?? ""}`;
   $$("aside nav a").forEach(a => a.dataset.route === (arg ? `${key}-${arg}` : key)
     ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
-  const navs = $(".navs"), cur = $('aside nav a[aria-current="page"]');  // phones: the rail is one scrolling row, so bring the current page into it
-  if (navs && cur && navs.scrollWidth > navs.clientWidth) { const a = cur.getBoundingClientRect(), n = navs.getBoundingClientRect();
-    if (a.left < n.left || a.right > n.right) navs.scrollLeft += a.left - n.left - 16; }
+  showCurrentNav();
   // Skeletons only on a real navigation that's slow; background re-renders of the same view swap in place.
   const skel = where !== shown && setTimeout(() => {
     if (seq === renderSeq) { view.innerHTML = skeletons[key](); view.setAttribute("aria-busy", "true"); } }, 120);
@@ -2202,7 +2473,12 @@ document.addEventListener("keydown", e => {
   else if (p && (k === "j" || k === "l")) { e.preventDefault(); p.currentTime = Math.max(p.currentTime + (k === "j" ? -10 : 10), 0); }
 });
 window.addEventListener("unhandledrejection", e => { toast("Error: " + (e.reason?.message || e.reason), 5000); });
-(async () => { await loadCourses().catch(() => {}); await render(); heartbeat(); setInterval(heartbeat, 15000); refreshDue(); setInterval(refreshDue, 60000); pollJobs();
+(async () => { await loadCourses().catch(() => {});
+  if (!state.courses.length && /^(#\/?)?$/.test(location.hash)) {  // a fresh install opens on Setup instead of an empty Library
+    const st = await api("/api/setup").catch(() => null);
+    if (st?.first_run) { history.replaceState(history.state, "", "#/setup"); here = location.hash; handled = location.href; }
+  }
+  await render(); heartbeat(); setInterval(heartbeat, 15000); refreshDue(); setInterval(refreshDue, 60000); pollJobs();
   const tab = new URL(location.href).searchParams.get("add");
   if (["file", "link", "canvas"].includes(tab)) openAdd(tab); else if (tab !== null) setAddParam(null); })();
 </script>

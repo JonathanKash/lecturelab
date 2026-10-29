@@ -158,6 +158,21 @@ What was said, the notes and the slides, across every lecture.
 - **Escaping:** the server escapes snippets and adds `<mark>`. The page drops any other tag.
 - **States:** before typing (what's searched and how matching works), nothing matches (try fewer words), error (the server's reason), and no search on this server.
 
+## Setup
+
+For someone who just installed LectureLab, and for you when a setting changes. Its one job: get from a fresh install to the first recording, and show what's ready and what isn't.
+
+- **Where:** `#/setup`, "Setup" at the end of the rail. A fresh install (no courses, no lectures) opens here instead of the Library.
+- **The rows are the path a lecture takes:** Courses, Canvas, Recordings, Transcripts, Notes, Saved to. They're on rule lines like lectures, not cards, and not numbered: the order is the point, so it's shown by the tape.
+- **The tape, bent into a line:** a 4px vertical segment beside each row, in the tape's textures. Solid ink: ready. Dotted pencil: not set up, or optional. Danger: broken, with the fix beside it. Highlighter: being checked right now. A word always says the same thing as the texture, so color is never the only signal: "Ready" or "Connected" (solid), "Add one", "Not checked", "Not connected", "Optional" or "Off" (dotted), "Fix this" or "Sign in again" (danger), "Checking…" (highlighter). No checkmarks, no "4 of 6", no progress bar.
+- **Each row:** name (17, 600), a one-line pencil description of what that stage does, the status word at the right, then whatever it needs: a field and a button, or a path in mono.
+- **Courses:** the list with Delete (asks first; a course with lectures says why it can't go). After a delete, focus moves to the next Delete, so a phone doesn't pop its keyboard. An add form for code and name. Once Canvas is connected, "Show my Canvas courses" lists the ones not added yet, each with "Add" and its suggested code.
+- **Canvas:** the address and "Save address", then "Connect Canvas", which opens LectureLab's own browser. The password is never typed into this page. A value from `.env` disables the field and says so.
+- **Notes:** "Check Claude's sign-in" makes one tiny real call, so it only runs when pressed. The result stays on the row.
+- **The end:** "Add your first recording" (or "Go to the Library" once there are lectures). It stays off until there's a course, ffmpeg is found and the notes folder can be written, and the line beside it says which of those is missing.
+- **Verbs carry through:** "Save address" ends in "Address saved", "Add course" in "Added COP4020", "Delete" in "Deleted COP4020". Field errors go under their field and take focus.
+- **States:** a loading skeleton of six rows, and the shared error view. There's no empty state, because every row always has something to say.
+
 ## Motion
 
 - Only `transform` and `opacity`. No color transitions; hover changes are instant.

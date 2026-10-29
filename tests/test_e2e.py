@@ -48,7 +48,8 @@ def server(tmp_path_factory):
            "LECTURELAB_LOG": str(data / "server.log"), "LECTURELAB_INBOX": str(data / "inbox"),
            "LECTURELAB_DRIVE_INBOX": str(data / "drive_inbox"), "LECTURELAB_INBOX_INTERVAL": "1",
            # Never touch the real Colab account from tests; transcribe with the small cached model.
-           "LECTURELAB_COLAB": "off", "LECTURELAB_LOCAL_MODEL": "base", "LECTURELAB_NOTIFY": "off"}
+           "LECTURELAB_COLAB": "off", "LECTURELAB_LOCAL_MODEL": "base", "LECTURELAB_NOTIFY": "off",
+           "LECTURELAB_NOTES_DIR": str(data / "notes")}  # exports never reach a real folder
     assert health() is None, f"port {PORT} already in use"
     # pythonw + supervise is exactly how the logon task runs it: hidden, restarting on crash.
     sup = subprocess.Popen([str(PYTHONW), str(ROOT / "cli.py"), "supervise"], cwd=ROOT, env=env)
@@ -1066,6 +1067,198 @@ def test_back_after_cancelling_leave_leaves_on_the_first_press(page):
     expect(page).to_have_url(re.compile(r"#/search$"))  # not a second #/courses entry
     expect(page.locator("#sr-q")).to_be_visible()
 
+
+
+SETUP = {"first_run": False, "courses": 0, "lectures": 0, "ffmpeg": True, "libreoffice": False,
+         "claude": {"installed": True, "off": False, "last_check": None}, "colab": {"enabled": True, "worked": False},
+         "canvas": {"base": None, "state": "not_connected"}, "notes_dir": {"path": "C:\\Users\\you\\Documents\\LectureLab Notes", "writable": True},
+         "inbox": "C:\\Users\\you\\Documents\\LectureLab Inbox", "disk_free_gb": 100.0, "overridden": []}
+
+
+def test_setup_screen_against_stubbed_answers(page):
+    # A fresh install opens on Setup. Each step's tape and word say how ready it is; errors go under their field.
+    st = json.loads(json.dumps(SETUP))
+    st["first_run"] = True
+    courses, puts = [], []
+
+    def settings(route):
+        body = json.loads(route.request.post_data)
+        puts.append(body)
+        if body.get("canvas_base", "").startswith("http:"):
+            return route.fulfill(status=400, json={"detail": {"fields": {"canvas_base": "Canvas addresses start with https://, not http://."}}})
+        st["canvas"]["base"] = "https://" + body["canvas_base"]
+        route.fulfill(json=st)
+
+    held, checks = [], []
+
+    def check(route):
+        checks.append(1)
+        if len(checks) == 1:  # the first check is held, to see it running, then fails
+            return held.append(route)
+        st["claude"]["last_check"] = {"ok": False, "message": "Claude Code isn't signed in. Run claude and log in.", "at": "2026-10-29T14:03:00"}
+        route.fulfill(json=st["claude"]["last_check"])
+    page.route(re.compile(r"/api/setup$"), lambda r: r.fulfill(json=st))
+    page.route(re.compile(r"/api/courses$"), lambda r: r.fulfill(json=courses))
+    page.route(re.compile(r"/api/settings$"), settings)
+    page.route(re.compile(r"/api/setup/check-claude$"), check)
+    page.goto(BASE + "/")
+    expect(page).to_have_url(re.compile(r"#/setup$"))
+    word = lambda s: page.locator(f'[data-step="{s}"] .step-word')
+    tape = lambda s: page.locator(f'[data-step="{s}"] .step-tape')
+    expect(word("courses")).to_have_text("Add one")
+    expect(tape("courses")).to_have_attribute("data-tape", "waiting")
+    expect(word("canvas")).to_have_text("Optional")
+    expect(word("recordings")).to_have_text("Ready")
+    expect(tape("recordings")).to_have_attribute("data-tape", "done")
+    expect(word("notes")).to_have_text("Not checked")
+    expect(page.locator("#su-done")).to_be_disabled()
+    expect(page.locator("#su-missing")).to_have_text("First add a course.")
+    expect(page.locator("[data-route=setup]")).to_have_attribute("aria-current", "page")
+    for width in (375, 1440):  # no sideways scroll, and the long inbox path wraps
+        page.set_viewport_size({"width": width, "height": 900})
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+    # an empty code is caught here; a bad address comes back from the server and lands under its field
+    page.click("#su-course-add")
+    expect(page.locator("#su-code-err")).to_have_text("Type the course’s code, like CS101.")
+    expect(page.locator("#su-code")).to_be_focused()
+    page.fill("#su-canvas", "http://school.instructure.com")
+    page.click("#su-canvas-save")
+    expect(page.locator("#su-canvas-err")).to_have_text("Canvas addresses start with https://, not http://.")
+    expect(page.locator("#su-canvas")).to_be_focused()
+    expect(page.locator("#su-canvas")).to_have_attribute("aria-invalid", "true")
+    page.fill("#su-canvas", "school.instructure.com")
+    page.click("#su-canvas-save")
+    expect(page.locator("#toast")).to_have_text("Address saved")
+    expect(word("canvas")).to_have_text("Not connected")
+    expect(page.locator("#su-connect")).to_have_text("Connect Canvas")
+    assert puts[-1] == {"canvas_base": "school.instructure.com"}
+    # typing survives a background redraw
+    page.fill("#su-canvas", "half-typed")
+    page.click("#su-recheck")
+    expect(page.locator("#toast")).to_have_text("Checked again")
+    expect(page.locator("#su-canvas")).to_have_value("half-typed")
+    page.fill("#su-canvas", "school.instructure.com")
+    # the Claude check: highlighter while it runs; a failure gives the button back and says so
+    page.click("#su-claude")
+    expect(tape("notes")).to_have_attribute("data-tape", "active")
+    expect(word("notes")).to_have_text("Checking…")
+    expect(page.locator("#su-claude")).to_be_disabled()
+    held.pop().fulfill(status=500, json={"detail": "claude timed out"})
+    expect(page.locator('[data-step="notes"] .field-error')).to_have_text("The check didn’t finish: claude timed out")
+    expect(page.locator("#su-claude")).to_be_enabled()
+    expect(page.locator("#su-claude")).to_be_focused()
+    expect(word("notes")).to_have_text("Not checked")
+    page.click("#su-claude")
+    expect(page.locator("#toast")).to_contain_text("Checked: Claude Code isn't signed in")
+    expect(word("notes")).to_have_text("Fix this")
+    expect(tape("notes")).to_have_attribute("data-tape", "error")
+    expect(page.locator('[data-step="notes"] .step-body')).to_contain_text("Checked Oct 29")
+    # with a course, the last button turns on; ffmpeg missing turns it off again and says why
+    courses.append({"id": 1, "code": "CS101", "name": "Intro to Computer Science", "vocabulary": "", "canvas_id": None, "auto_pull": 0})
+    st["courses"], st["ffmpeg"] = 1, False
+    page.click("#su-recheck")
+    expect(page.locator("#toast")).to_have_text("Checked again")
+    expect(word("recordings")).to_have_text("Fix this")
+    expect(page.locator("#su-missing")).to_have_text("First install ffmpeg.")
+    st["ffmpeg"] = True
+    page.click("#su-recheck")
+    expect(page.locator("#su-done")).to_be_enabled()
+    expect(page.locator("#su-done")).to_have_text("Add your first recording")
+    page.click("#su-done")
+    expect(page.locator("#add-dlg")).to_be_visible()
+
+
+def test_setup_canvas_courses_and_leaving_mid_request(page):
+    st = json.loads(json.dumps(SETUP))
+    st["canvas"] = {"base": "https://school.instructure.com", "state": "connected"}
+    courses, posted, held = [{"id": 1, "code": "CS101", "name": "Intro", "vocabulary": "", "canvas_id": 7, "auto_pull": 0}], [], []
+    listed = [{"canvas_id": 7, "name": "Intro", "suggested_code": "CS101", "course_id": 1, "term": "Fall 2026"},
+              {"canvas_id": 8, "name": "Data Structures", "suggested_code": "COP3530", "course_id": None, "term": "Fall 2026"},
+              {"canvas_id": 9, "name": "Student Success Seminar", "suggested_code": None, "course_id": None, "term": None}]
+
+    def course_api(route):
+        if route.request.method == "GET":
+            return route.fulfill(json=courses)
+        body = json.loads(route.request.post_data)
+        if body["code"] == "SLOW1":
+            return held.append(route)
+        posted.append(body)
+        made = {"id": len(courses) + 1, "vocabulary": "", "auto_pull": 0, **body}
+        courses.append(made)
+        route.fulfill(json=made)
+    page.route(re.compile(r"/api/setup$"), lambda r: r.fulfill(json=st))
+    page.route(re.compile(r"/api/courses$"), course_api)
+    page.route(re.compile(r"/api/canvas/courses$"), lambda r: r.fulfill(json=listed))
+    page.goto(BASE + "/#/setup")
+    expect(page.locator('[data-step="canvas"] .step-word')).to_have_text("Connected")
+    page.click("#su-cv-courses")
+    rows = page.locator("#su-cv-list li")
+    expect(rows).to_have_count(2)  # the course already in LectureLab isn't offered again
+    rows.filter(has_text="Data Structures").locator("button").click()
+    expect(page.locator("#toast")).to_have_text("Added COP3530")
+    assert posted[-1] == {"code": "COP3530", "name": "Data Structures", "canvas_id": 8}
+    expect(page.locator("#su-cv-list li")).to_have_count(1)
+    # no code in its name: you give it one, and it's still linked to Canvas
+    page.locator("#su-cv-list li button").click()
+    expect(page.locator("#su-code-err")).to_contain_text("Give Student Success Seminar a short code")
+    expect(page.locator("#su-name")).to_have_value("Student Success Seminar")
+    page.fill("#su-code", "SLS1101")
+    page.click("#su-course-add")
+    expect(page.locator("#toast")).to_have_text("Added SLS1101")
+    assert posted[-1] == {"code": "SLS1101", "name": "Student Success Seminar", "canvas_id": 9}
+    expect(page.locator("#su-cv-list")).to_contain_text("already here")
+    # leaving while an add is out: no error lands on the next page
+    page.fill("#su-code", "SLOW1")
+    page.click("#su-course-add")
+    page.once("dialog", lambda d: d.accept())  # the typed code counts as unsaved: leave anyway
+    page.click('aside nav a[data-route="library"]')
+    expect(page.locator("#view h2")).to_have_text("Library")
+    held.pop().fulfill(json={"id": 99, "code": "SLOW1", "name": "SLOW1", "vocabulary": "", "canvas_id": None, "auto_pull": 0})
+    page.wait_for_timeout(500)
+    assert "Error" not in (page.locator("#toast").text_content() or "")
+
+
+def test_setup_screen_loading_and_error(page):
+    held = []
+    page.route(re.compile(r"/api/setup$"), lambda r: held.append(r))
+    page.goto(BASE + "/#/setup")
+    expect(page.locator("#view .step-sk")).to_have_count(6)  # the skeleton is the six steps
+    held.pop().fulfill(status=500, json={"detail": "database is locked"})
+    expect(page.locator("[data-error]")).to_contain_text("database is locked")
+    page.unroute(re.compile(r"/api/setup$"))
+    page.click("[data-retry]")
+    expect(page.locator('[data-step="courses"]')).to_be_visible()
+
+
+def test_setup_adds_and_deletes_a_course(page):
+    # Against the real server, whose Canvas address and notes folder come from the environment.
+    # It has the seeded courses (LECTURELAB_SEED_COURSES=uf), so it isn't a fresh install and "/" stays the Library.
+    for c in api("/api/courses"):
+        if c["code"] == "CS101":
+            api(f"/api/courses/{c['id']}", "DELETE")
+    page.goto(BASE + "/")
+    expect(page.locator("#view h2")).to_have_text("Library")
+    assert "#/setup" not in page.url
+    page.goto(BASE + "/#/setup")
+    expect(page.locator("#su-canvas")).to_be_disabled()
+    expect(page.locator('[data-step="canvas"]')).to_contain_text("Set by CANVAS_BASE_URL")
+    expect(page.locator("#su-folder")).to_be_disabled()
+    page.fill("#su-code", "cop4020")
+    page.click("#su-course-add")
+    expect(page.locator("#su-code-err")).to_have_text("You already have a course COP4020.")
+    page.fill("#su-code", "cs 101")
+    page.fill("#su-name", "Intro to Computer Science")
+    page.click("#su-course-add")
+    expect(page.locator("#toast")).to_have_text("Added CS101")
+    expect(page.locator("#course-nav")).to_contain_text("CS101")
+    expect(page.locator("#su-code")).to_have_value("")
+    expect(page.locator("#su-code")).to_be_focused()
+    page.click('[data-del-course][data-code="CS101"]')
+    page.click("#confirm-ok")
+    expect(page.locator("#toast")).to_have_text("Deleted CS101")
+    expect(page.locator("[data-del-course]").first).to_be_focused()  # the next Delete, not the code field
+    expect(page.locator("#course-nav")).not_to_contain_text("CS101")
+    assert all(c["code"] != "CS101" for c in api("/api/courses"))
 
 
 def test_supervisor_restarts_crashed_server(server, page):
