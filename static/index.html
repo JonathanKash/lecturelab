@@ -759,7 +759,7 @@ function colabLine(ts, running) {
 }
 
 // ---- Setup: the path a lecture takes, top to bottom. Each step's tape segment says whether it's ready (DESIGN.md).
-const su = { st: null, cvList: null, cvAll: 0, pending: null, seq: 0 };
+const su = { st: null, cvList: null, cvAll: 0, pending: null, seq: 0, next: null };
 const STEP_TAPE = { ready: "done", todo: "waiting", optional: "waiting", error: "error", checking: "active" };
 const STEPS = ["courses", "canvas", "recordings", "transcripts", "notes", "saved"];
 const andList = xs => xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`;
@@ -823,7 +823,7 @@ const setupSteps = {
       c.off ? `<p class="hint">Turned off on this server (LECTURELAB_CLAUDE=off). Offline notes still work.</p>`
       : !c.installed ? `<p class="err">Claude Code isn’t installed. Install it from <a href="https://claude.com/claude-code" target="_blank" rel="noopener">claude.com/claude-code</a>,
           run <code>claude</code> once to sign in to your Claude plan, then press Check again.</p>`
-      : `<div class="row"><button type="button" id="su-claude" class="${lc?.ok ? "ghost" : ""}">Check Claude’s sign-in</button>
+      : `<div class="row"><button type="button" id="su-claude" class="ghost">Check Claude’s sign-in</button>
           <span class="hint">Sends Claude one short message, which uses a little of your plan.</span></div>
         ${lc ? `<p class="${lc.ok ? "" : "err"}">${esc(lc.message)} <span class="muted small">Checked ${esc(checkedAt(lc.at))}</span></p>` : ""}`);
   },
@@ -841,7 +841,7 @@ const setupSteps = {
 function setupEnd(st) {
   const missing = [!state.courses.length && "add a course", !st.ffmpeg && "install ffmpeg",
     !st.notes_dir.writable && "pick a notes folder LectureLab can write to"].filter(Boolean);
-  return `<div class="setup-end" id="setup-end"><button type="button" id="su-done" ${missing.length ? 'disabled aria-describedby="su-missing"' : ""}>${
+  return `<div class="setup-end" id="setup-end"><button type="button" id="su-done" ${st.lectures ? 'class="ghost" ' : ""}${missing.length ? 'disabled aria-describedby="su-missing"' : ""}>${
     st.lectures ? "Go to the Library" : "Add your first recording"}</button>
     ${missing.length ? `<p class="hint" id="su-missing">First ${andList(missing)}.</p>` : ""}</div>`;
 }
@@ -894,8 +894,8 @@ async function busy(btn, label, work, onError) {
 
 const views = {
   async setup() {
-    const [st] = await Promise.all([api("/api/setup"), loadCourses()]);
-    Object.assign(su, { st, cvList: null, pending: null });
+    const seq = renderSeq, [st] = await Promise.all([api("/api/setup"), loadCourses()]);
+    if (seq === renderSeq) su.next = st;
     return `<div class="setup-page"><div class="page-head"><h2>Set up LectureLab</h2><button type="button" class="ghost" id="su-recheck">Check again</button></div>
       <p class="lede">Every lecture goes down this list: filed under a course, brought in, transcribed, written up and saved. A solid line beside a step means it’s ready.</p>
       <div id="setup-wrap"><ol class="setup" id="setup" aria-label="What a lecture needs">${STEPS.map(k => setupSteps[k](st)).join("")}</ol>${setupEnd(st)}</div></div>`;
@@ -1071,6 +1071,8 @@ const views = {
 
 const binders = {
   setup() {
+    if (su.next) Object.assign(su, { st: su.next, cvList: null, pending: null });
+    su.next = null;
     const wrap = $("#setup-wrap");
     $("#su-recheck").onclick = e => busy(e.currentTarget, "Checking…", async () => { await refreshSetup(); toast("Checked again"); },
       err => toast(`The check didn’t finish: ${err.message}`, 5000));
@@ -1083,9 +1085,10 @@ const binders = {
         const code = $("#su-code").value.trim(), name = $("#su-name").value.trim();
         if (!code) return setupError($("#su-code"), "Type the course’s code, like CS101.");
         return busy(btn, "Adding…", async () => {
-          const c = await api("/api/courses", { method: "POST", body: { code, name,
-            canvas_id: su.pending && su.pending.name === name ? su.pending.id : null } });
-          su.pending = null; dirty.delete("course"); toast(`Added ${c.code}`);
+          const linked = su.pending && su.pending.name === name, unlinked = su.pending && !linked && su.pending.name;
+          const c = await api("/api/courses", { method: "POST", body: { code, name, canvas_id: linked ? su.pending.id : null } });
+          su.pending = null; dirty.delete("course");
+          toast(unlinked ? `Added ${c.code}. It isn’t linked to ${unlinked} on Canvas, because its name changed.` : `Added ${c.code}`, unlinked ? 6000 : undefined);
           if (su.cvList) su.cvList = su.cvList.filter(x => x.canvas_id !== c.canvas_id);
           await refreshSetup().catch(refreshFailed); $("#su-code")?.focus();
         }, err => setupError(/\bname\b/i.test(err.message) ? $("#su-name") : $("#su-code"), err.message));
@@ -1100,9 +1103,13 @@ const binders = {
     };
     wrap.onclick = async e => {
       const t = e.target.closest("button"); if (!t || t.disabled || t.type === "submit") return;
-      if (t.id === "su-done") { const first = !su.st.lectures; location.hash = "#/"; if (first) openAdd(); }
+      if (t.id === "su-done") {
+        if (dirty.size && !confirm("You have unsaved changes on this page. Leave without saving them?")) return;
+        const first = !su.st.lectures; dirty.clear(); location.hash = "#/"; if (first) openAdd();
+      }
       else if (t.dataset.delCourse) {
         const code = t.dataset.code;
+        clearSetupErrors();
         if (!await confirmDanger(`Delete ${code}?`, `${code} and its slide decks are removed from LectureLab. A course that still has lectures can’t be deleted.`, "Delete course")) return;
         try { await api(`/api/courses/${t.dataset.delCourse}`, { method: "DELETE" }); }
         catch (err) { stepError(t, err.message); if (t.isConnected) t.focus(); return; }
@@ -1111,6 +1118,7 @@ const binders = {
         ($("#setup [data-del-course]") || $("#su-code"))?.focus();
       }
       else if (t.id === "su-claude") {
+        clearSetupErrors();
         const li = t.closest(".step"), tape = $(".step-tape", li), word = $(".step-word", li);
         const before = [li.dataset.state, tape.dataset.tape, word.textContent];
         li.dataset.state = "checking"; tape.dataset.tape = "active"; word.textContent = "Checking…";
@@ -1121,12 +1129,14 @@ const binders = {
         if (!await refreshSetup().then(() => true, () => false) && li.isConnected) [li.dataset.state, tape.dataset.tape, word.textContent] = before;
         const again = $("#su-claude");
         if (again && fail) stepError(again, `The check didn’t finish: ${fail}`);
-        again?.focus();
+        if (again && document.activeElement === document.body) again.focus();
       }
       else if (t.id === "su-connect") {
+        clearSetupErrors();
         await busy(t, "Browser open…", async () => { await connectCanvas(); await refreshSetup(); }, err => stepError(t, err.message));
       }
       else if (t.id === "su-cv-courses") {
+        clearSetupErrors();
         await busy(t, "Loading your Canvas courses…", async () => {
           const all = await api("/api/canvas/courses", { method: "POST" });
           su.cvAll = all.length; su.cvList = all.filter(c => !c.course_id);
@@ -1136,8 +1146,8 @@ const binders = {
       else if (t.dataset.cvAdd) {
         const c = su.cvList?.find(c => String(c.canvas_id) === t.dataset.cvAdd); if (!c) return;
         if (!c.suggested_code) {  // nothing in its name looks like a code: you give it one
-          if (!$("#su-name").value.trim()) $("#su-name").value = c.name;
-          su.pending = { id: c.canvas_id, name: $("#su-name").value.trim() }; dirty.add("course");
+          $("#su-name").value = c.name;
+          su.pending = { id: c.canvas_id, name: c.name.trim() }; dirty.add("course");
           return setupError($("#su-code"), `Give ${c.name} a short code, like CS101, then press Add course.`);
         }
         await busy(t, "Adding…", async () => {
@@ -2149,7 +2159,10 @@ $("#view").addEventListener("input", e => {
   if (card) { dirty.add(`course-${card.dataset.course}`); $(".save-course", card).classList.remove("ghost");
     if (e.target.matches(".course-vocab")) $(".term-count", card).textContent = termCount(e.target.value); }
   else if (e.target.closest("#lec-meta")) dirty.add("meta");
-  else if (e.target.dataset.dirty) dirty.add(e.target.dataset.dirty);
+  else if (e.target.dataset.dirty) {  // a setup field: unsaved only while it differs from what the server has
+    const k = e.target.dataset.dirty, changed = $$(`#view [data-dirty="${k}"]`).some(i => i.value !== i.defaultValue);
+    changed || (k === "course" && su.pending) ? dirty.add(k) : dirty.delete(k);
+  }
 });
 $("#view").addEventListener("click", e => {
   if (e.target.closest("[data-action=add]")) openAdd();

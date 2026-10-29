@@ -170,6 +170,8 @@ For someone who just installed LectureLab, and for you when a setting changes. I
 - **Canvas:** the address and "Save address", then "Connect Canvas", which opens LectureLab's own browser. The password is never typed into this page. A value from `.env` disables the field and says so.
 - **Notes:** "Check Claude's sign-in" makes one tiny real call, so it only runs when pressed. The result stays on the row.
 - **The end:** "Add your first recording" (or "Go to the Library" once there are lectures). It stays off until there's a course, ffmpeg is found and the notes folder can be written, and the line beside it says which of those is missing.
+- **Solid only where something's missing:** ballpoint goes to the button that fixes a missing step: "Add course" with no courses, "Save address" with no address, "Connect Canvas" or "Sign in to Canvas" when that's what's missing, and "Add your first recording". Once a step is ready its button turns ghost, so a set-up page has none. Everything else is always ghost: "Check Claude's sign-in" always, because it spends a little of your plan and shouldn't look like the thing to press, and "Go to the Library" once there are lectures.
+- **A Canvas course with no code in its name:** "Add" puts its name in the form and asks for a code. Change the name before adding and it's added without the Canvas link, and the toast says so.
 - **Verbs carry through:** "Save address" ends in "Address saved", "Add course" in "Added COP4020", "Delete" in "Deleted COP4020". Field errors go under their field and take focus.
 - **States:** a loading skeleton of six rows, and the shared error view. There's no empty state, because every row always has something to say.
 

@@ -1164,6 +1164,17 @@ def test_setup_screen_against_stubbed_answers(page):
     page.click("#su-recheck")
     expect(page.locator("#su-done")).to_be_enabled()
     expect(page.locator("#su-done")).to_have_text("Add your first recording")
+    expect(page.locator("#su-done")).not_to_have_class(re.compile(r"\bghost\b"))  # the one solid button: it's what's next
+    expect(page.locator("#su-claude")).to_have_class(re.compile(r"\bghost\b"))  # spends plan, so never the main action
+    # unsaved typing: staying put means no Add dialog either
+    page.fill("#su-code", "CS2")
+    page.once("dialog", lambda d: d.dismiss())
+    page.click("#su-done")
+    expect(page).to_have_url(re.compile(r"#/setup$"))
+    expect(page.locator("#add-dlg")).to_be_hidden()
+    page.fill("#su-code", "")
+    assert page.evaluate("[...dirty]") == ["canvas"]  # clearing the code undoes it; the address typed earlier is still unsaved
+    page.once("dialog", lambda d: d.accept())
     page.click("#su-done")
     expect(page.locator("#add-dlg")).to_be_visible()
 
@@ -1198,7 +1209,8 @@ def test_setup_canvas_courses_and_leaving_mid_request(page):
     expect(page.locator("#toast")).to_have_text("Added COP3530")
     assert posted[-1] == {"code": "COP3530", "name": "Data Structures", "canvas_id": 8}
     expect(page.locator("#su-cv-list li")).to_have_count(1)
-    # no code in its name: you give it one, and it's still linked to Canvas
+    # no code in its name: you give it one, and it's still linked to Canvas. Its own name replaces anything typed before.
+    page.fill("#su-name", "Something I was typing")
     page.locator("#su-cv-list li button").click()
     expect(page.locator("#su-code-err")).to_contain_text("Give Student Success Seminar a short code")
     expect(page.locator("#su-name")).to_have_value("Student Success Seminar")
@@ -1207,6 +1219,15 @@ def test_setup_canvas_courses_and_leaving_mid_request(page):
     expect(page.locator("#toast")).to_have_text("Added SLS1101")
     assert posted[-1] == {"code": "SLS1101", "name": "Student Success Seminar", "canvas_id": 9}
     expect(page.locator("#su-cv-list")).to_contain_text("already here")
+    # rename it before adding: it's added without the Canvas link, and the toast says so
+    courses.pop()
+    page.click("#su-cv-courses")
+    page.locator("#su-cv-list li", has_text="Student Success Seminar").locator("button").click()
+    page.fill("#su-name", "Seminar")
+    page.fill("#su-code", "SLS2")
+    page.click("#su-course-add")
+    expect(page.locator("#toast")).to_have_text("Added SLS2. It isn’t linked to Student Success Seminar on Canvas, because its name changed.")
+    assert posted[-1] == {"code": "SLS2", "name": "Seminar", "canvas_id": None}
     # leaving while an add is out: no error lands on the next page
     page.fill("#su-code", "SLOW1")
     page.click("#su-course-add")
