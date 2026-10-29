@@ -2662,3 +2662,82 @@ def test_stop_and_open_only_count_this_installs_server(ll, monkeypatch, tmp_path
     from fastapi.testclient import TestClient
     h = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}").get("/api/health").json()
     assert h["root"] == str(ll.ROOT)
+
+
+def test_canvas_scan_reads_zoom_cloud_recordings_from_the_zoom_tab(ll, monkeypatch):
+    import contextlib
+    from urllib.parse import unquote
+    recs = [{"meetingId": f"m{i}==", "topic": "COP4533 Algorithms", "recordingCount": 2} for i in range(30)]
+    recs[1]["recordingCount"] = 0  # a meeting that wasn't recorded
+
+    def mp4(i, size, start=None):
+        return {"fileType": "MP4", "playUrl": f"https://ufl.zoom.us/rec/play/v{i}-{size}", "fileSize": size,
+                "recordingStart": start or f"2026-10-{i % 28 + 1:02d} 20:30:00"}
+    files = {f"m{i}==": [{"fileType": "TIMELINE", "playUrl": ""}, mp4(i, 5),
+                         dict(mp4(i, 1), fileType="M4A")] for i in range(30)}
+    files["m2=="] = [{"fileType": "MP4", "playUrl": ""}]  # still processing
+    files["m3=="] = [mp4(3, 5), mp4(3, 9)]  # two views of one recording: the bigger one
+    files["m4=="] = [dict(mp4(4, 1), fileType="M4A")]  # audio only
+    files["m5=="] = [mp4(5, 5, "2026-10-06 09:00:00"), mp4(5, 7, "2026-10-06 09:40:00")]  # stopped and restarted
+    looked_up, failing = [], {"m6=="}
+
+    def zoom_get(path):
+        assert path.startswith("/api/v1/lti/rich/recording")
+        if "/recording/COURSE" in path:
+            n = int(path.split("page=")[1].split("&")[0])
+            return {"total": len(recs) if n == 1 else 0, "pageSize": 12, "list": recs[(n - 1) * 12:n * 12]}
+        mid = unquote(path.split("meetingId=")[1])
+        looked_up.append(mid)
+        if mid in failing:
+            raise ll.CanvasError("Zoom answered 500 for /api/v1/lti/rich/recording/file")
+        return {"recordingFiles": files[mid]}
+
+    opened, broken = [], {}
+
+    @contextlib.contextmanager
+    def fake_app(url):
+        opened.append(url)
+        if broken:
+            raise broken["e"]
+        yield zoom_get
+
+    tabs = [{"type": "external", "label": "Zoom Conferences", "html_url": "/courses/22/external_tools/166364"},
+            {"type": "external", "label": "Gradescope", "html_url": "/courses/22/external_tools/1"},
+            {"type": "external", "label": "Zoom elsewhere", "html_url": "/courses/99/external_tools/5"},
+            {"type": "internal", "label": "Zoom notes", "html_url": "/courses/22/pages/zoom"}]
+    monkeypatch.setattr(ll, "canvas_get", lambda path, params=None, paginate=True:
+                        tabs if path.endswith("/tabs") else ([] if paginate else None))
+    monkeypatch.setattr(ll, "CanvasSession", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(ll, "zoom_app", fake_app)
+    ll.set_canvas_state("connected", user="Kashi")
+    c = ll.find_course("COP4533")
+    c["canvas_id"] = 22
+    out = ll.canvas_scan_course(c)
+    # 30 on three pages (the later ones answer total 0), minus the unrecorded one, the one still
+    # processing and the failed lookup, plus a second part for the restarted one
+    assert out["new"] == 28 and "500" in out["zoom_error"]
+    assert opened == ["https://ufl.instructure.com/courses/22/external_tools/166364"]
+    with ll.db() as con:
+        items = {r["key"]: dict(r) for r in con.execute("SELECT * FROM canvas_items")}
+    it = items["zoom-cloud:m0=="]
+    assert (it["kind"], it["url"], it["title"]) == ("zoom", "https://ufl.zoom.us/rec/play/v0-5", "COP4533 Algorithms, Oct 1")
+    assert it["page_link"] == "https://ufl.instructure.com/courses/22/external_tools/166364"
+    assert ll.parse_date(it["created_at"]) == "2026-10-01"  # an 8:30 pm class stays on its own day
+    assert items["zoom-cloud:m3=="]["url"].endswith("v3-9")
+    assert items["zoom-cloud:m4=="]["url"].endswith("v4-1")
+    assert [items[k]["title"] for k in ("zoom-cloud:m5==", "zoom-cloud:m5==:2")] == \
+        ["COP4533 Algorithms, Oct 6 (part 1)", "COP4533 Algorithms, Oct 6 (part 2)"]
+    assert "zoom-cloud:m29==" in items and "m1==" not in looked_up
+    assert ll.canvas_source_url(it) == it["page_link"]  # the play link is the key to the recording: not shown
+
+    looked_up.clear()
+    failing.clear()
+    out = ll.canvas_scan_course(c)
+    assert out["new"] == 1 and "zoom_error" not in out  # the failed one, now that it answers
+    assert sorted(looked_up) == ["m2==", "m6=="]  # nothing already known is asked about again
+
+    broken["e"] = ll.CanvasError("the course's Zoom tab didn't open the Zoom app")
+    assert "Zoom app" in ll.canvas_scan_course(c)["zoom_error"]  # Zoom down: the rest of the scan still runs
+    broken["e"] = ll.CanvasNeedsSignIn("Canvas needs sign-in")
+    with pytest.raises(ll.CanvasNeedsSignIn):
+        ll.canvas_scan_course(c)

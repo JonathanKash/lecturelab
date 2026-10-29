@@ -1932,8 +1932,107 @@ def expand_drive_folders(items: dict[str, dict], decks: dict[str, dict] | None =
                     "found_at": f"{it.get('page_url')} > {f['path']}"})
 
 
+ZOOM_TAB_RE = re.compile(r"(?i)\bzoom\b")
+# Runs inside the Zoom app's frame: the app's own JSON API, with the session headers the app sends. GET only.
+_ZOOM_GET_JS = """async (path) => {
+  const conf = window.appConf || {}, headers = {Accept: 'application/json'};
+  for (const h of conf.ajaxHeaders || []) headers[h.key] = h.value;
+  const r = await fetch(path + (path.includes('?') ? '&' : '?') + 'lti_scid=' + encodeURIComponent(conf.page.scid),
+                        {method: 'GET', credentials: 'include', headers});
+  return {status: r.status, body: await r.text()};
+}"""
+
+
+@contextmanager
+def zoom_app(tab_url: str):
+    """Open a course's Zoom tab in the LectureLab browser, as clicking it would (Canvas launches the
+    Zoom app with your session), and yield get(path) for the app's recording API.
+    Needs the open CanvasSession."""
+    from urllib.parse import urlsplit
+
+    def zoom_host(url):
+        h = (urlsplit(url).hostname or "").lower()
+        return h == "zoom.us" or h.endswith(".zoom.us")
+    page = _canvas_local.session.ctx.new_page()
+    try:
+        page.goto(tab_url, wait_until="domcontentloaded", timeout=30_000)
+        frame, deadline = None, time.time() + 20
+        while not frame and time.time() < deadline:
+            frame = next((f for f in page.frames if zoom_host(f.url) and "/lti/" in urlsplit(f.url).path), None)
+            if not frame:
+                page.wait_for_timeout(500)
+        if not frame:
+            u = urlsplit(page.url)
+            if (u.hostname or "").lower() != urlsplit(canvas_base()).hostname or u.path.startswith("/login"):
+                # Sent to the sign-in page: the same sticky state an API 401 sets
+                set_canvas_state("needs_signin", reason="the Zoom tab went to the sign-in page")
+                raise CanvasNeedsSignIn("Canvas needs sign-in: click Connect Canvas in LectureLab")
+            raise CanvasError("the course's Zoom tab didn't open the Zoom app")
+        frame.wait_for_function("window.appConf && window.appConf.page && window.appConf.page.scid", timeout=20_000)
+
+        def get(path: str) -> dict:
+            if not path.startswith("/api/v1/lti/rich/recording"):
+                raise CanvasError(f"refusing a Zoom request outside its recording list: {path}")
+            r = frame.evaluate(_ZOOM_GET_JS, path)
+            try:
+                data = json.loads(r["body"]) if r["status"] == 200 else {}
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict) or not data.get("status"):
+                raise CanvasError(f"Zoom answered {r['status']} for {path.split('?')[0]}")
+            return data.get("result") or {}
+        yield get
+    finally:
+        page.close()
+
+
+def zoom_cloud_recordings(get, known: set[str], max_pages: int = 50) -> tuple[list[dict], list[str]]:
+    """Cloud recordings in a course's Zoom tab, newest first, as canvas items, plus the errors met.
+    `get` is zoom_app's. Meetings already in `known` aren't looked up again; one that's still
+    processing has no file yet, and one whose lookup fails is skipped: both are tried next scan."""
+    from urllib.parse import quote
+    known_ids = {k.split(":", 2)[1] for k in known if k.startswith("zoom-cloud:")}
+    out, errors, pages = [], [], None
+    for page_no in range(1, max_pages + 1):
+        res = get(f"/api/v1/lti/rich/recording/COURSE?startTime=&endTime=&keyWord=&searchType=1&status=&page={page_no}&total=0")
+        listed = res.get("list") or []
+        if pages is None:  # later pages may not repeat the total
+            pages = -(-int(res.get("total") or 0) // max(int(res.get("pageSize") or 0), len(listed), 1))
+        new_here = 0
+        for rec in listed:
+            mid = rec.get("meetingId")
+            if not mid or mid in known_ids or not rec.get("recordingCount"):
+                continue
+            new_here += 1
+            try:
+                files = get("/api/v1/lti/rich/recording/file?meetingId=" + quote(mid, safe="")).get("recordingFiles")
+            except CanvasError as e:
+                errors.append(f"{rec.get('topic') or mid}: {e}")
+                continue
+            # Files that start together are views of one recording (Zoom doesn't say which view):
+            # keep the biggest, preferring video for the player. A recording stopped and restarted has parts.
+            parts: dict[str, list[dict]] = {}
+            for f in files or []:
+                if f.get("playUrl") and f.get("fileType") in ("MP4", "M4A"):
+                    parts.setdefault(f.get("recordingStart") or "", []).append(f)
+            for n, start in enumerate(sorted(parts)):
+                f = max(parts[start], key=lambda f: (f["fileType"] == "MP4", f.get("fileSize") or 0))
+                try:  # the class's local time, so its date is the lecture's
+                    day = datetime.strptime(start[:10], "%Y-%m-%d")
+                    title = f"{rec.get('topic') or 'Zoom recording'}, {day:%b} {day.day}"
+                except ValueError:
+                    title = rec.get("topic") or "Zoom recording"
+                if len(parts) > 1:
+                    title += f" (part {n + 1})"
+                out.append({"key": f"zoom-cloud:{mid}" + (f":{n + 1}" if n else ""), "kind": "zoom", "title": title,
+                            "url": f["playUrl"], "page_url": "Zoom cloud recordings", "created_at": start or None})
+        if not listed or page_no >= pages or not new_here:  # newest first: a page with nothing new ends it
+            break
+    return out, errors
+
+
 def canvas_scan_course(course: dict, progress=None) -> dict:
-    """Find recordings and slide decks in a course's Files, Modules, Pages and Announcements.
+    """Find recordings and slide decks in a course's Files, Modules, Pages, Announcements and Zoom tab.
     Records new ones; new decks are downloaded right away (they're small)."""
     canvas_ready()  # not connected or needs sign-in: no browser, no "expired" toast
     with CanvasSession():
@@ -1941,7 +2040,7 @@ def canvas_scan_course(course: dict, progress=None) -> dict:
 
 
 def _canvas_scan_course(course: dict, progress=None) -> dict:
-    from urllib.parse import quote
+    from urllib.parse import quote, urlsplit
     cid = course["canvas_id"]
     say = progress or (lambda m: None)
     items: dict[str, dict] = {}
@@ -2002,6 +2101,32 @@ def _canvas_scan_course(course: dict, progress=None) -> dict:
             m.setdefault("created_at", a.get("posted_at"))
             m["page_link"] = a.get("html_url")
             add(m)
+    say("zoom")
+    with db() as con:
+        known = {r[0] for r in con.execute("SELECT key FROM canvas_items WHERE course_id=? AND key LIKE 'zoom-cloud:%'",
+                                           (course["id"],))}
+    zoom_errors: list[str] = []
+    for tab in canvas_get(f"courses/{cid}/tabs", paginate=False) or []:
+        path = urlsplit(tab.get("html_url") or "").path
+        if tab.get("type") != "external" or tab.get("hidden") or not ZOOM_TAB_RE.search(tab.get("label") or "") \
+                or not path.startswith(f"/courses/{cid}/external_tools/"):
+            continue
+        tab_url = canvas_base() + path
+        try:  # Zoom being down or changed must not cost the rest of the scan
+            with zoom_app(tab_url) as get:
+                found, errors = zoom_cloud_recordings(get, known)
+            for it in found:
+                it["page_link"] = tab_url
+                add(it)
+            zoom_errors += errors
+        except CanvasNeedsSignIn:
+            raise
+        except Exception as e:
+            zoom_errors.append(str(e))
+            break  # one Zoom tab per course; don't wait on a second when the first failed
+    if zoom_errors:
+        log.warning("couldn't read all Zoom cloud recordings of %s: %s", course["code"],
+                    scrub_urls("; ".join(zoom_errors))[:1000])
     say("drive folders")
     expand_drive_folders(items, decks)
     new = 0
@@ -2020,7 +2145,10 @@ def _canvas_scan_course(course: dict, progress=None) -> dict:
     slides_scanned(course["id"])
     log.info("canvas scan %s: %s items (%s new), %s decks (%s new); not lecture slides: %s", course["code"],
              len(items), new, len(decks), decks_new, skipped)
-    return {"found": len(items), "new": new, "decks": len(decks), "decks_new": decks_new}
+    out = {"found": len(items), "new": new, "decks": len(decks), "decks_new": decks_new}
+    if zoom_errors:  # so "nothing new" and "Zoom failed" don't look the same
+        out["zoom_error"] = scrub_urls(zoom_errors[0])[:300]
+    return out
 
 
 def canvas_file_source(file_id: int) -> tuple[str, str, dict]:
@@ -2067,6 +2195,8 @@ def canvas_source_url(it: dict) -> str:
         return f"{base}/courses/{course.get('canvas_id')}/files/{it['url'].split(':', 1)[1]}"
     if it["kind"] == "media_object":
         return f"{base}/media_objects/{it['url'].split(':', 1)[1]}"
+    if it["key"].startswith("zoom-cloud:") and it.get("page_link"):
+        return it["page_link"]  # a cloud recording's play link is itself the key to it
     return it["url"]
 
 

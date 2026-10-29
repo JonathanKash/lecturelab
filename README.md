@@ -4,7 +4,7 @@ Turns real lecture recordings into notes, flashcards and quizzes you can study f
 
 ## What it does
 
-1. **Pulls in recordings** from Canvas (Kaltura and Panopto included), Google Drive and video links, plus inbox folders you drop files into.
+1. **Pulls in recordings** from Canvas (Kaltura, Panopto and the course's Zoom cloud recordings included), Google Drive and video links, plus inbox folders you drop files into.
 2. **Transcribes them** with Whisper large-v3 on a free Colab T4. It falls back to faster-whisper on your own CPU when Colab isn't available.
 3. **Matches slides.** The deck comes from Canvas and each part of the transcript is matched to the slide on screen.
 4. **Writes notes with Claude Code** on your Max plan.
