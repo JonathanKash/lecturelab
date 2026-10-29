@@ -5599,7 +5599,8 @@ def create_app():
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": VERSION, "pid": os.getpid(), "time": time.time()}
+        # root: which install this is, so `stop` and the installer never act on another copy's server
+        return {"ok": True, "version": VERSION, "pid": os.getpid(), "time": time.time(), "root": str(ROOT)}
 
     @app.get("/api/courses")
     def api_courses():

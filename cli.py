@@ -80,11 +80,18 @@ def cmd_supervise(args) -> int:
 
 
 def _live_server_pid() -> int | None:
+    """The pid of this install's server on the port. Another copy's server (a second checkout, an
+    installed copy) doesn't count, so `stop` can't kill it. A server too old to report its root is
+    taken as this one."""
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{ll.PORT}/api/health", timeout=3) as r:
-            return json.load(r)["pid"]
+            h = json.load(r)
     except Exception:
         return None
+    root = h.get("root")
+    if root and os.path.normcase(os.path.realpath(root)) != os.path.normcase(os.path.realpath(ll.ROOT)):
+        return None
+    return h["pid"]
 
 
 def cmd_stop(args) -> int:
@@ -109,6 +116,7 @@ def cmd_stop(args) -> int:
             print("stopped")
             return 0
         time.sleep(0.25)
+    STOP_FLAG.unlink(missing_ok=True)  # left behind, it would stop the supervisor at its next restart
     print("supervisor did not stop; see server.log")
     return 1
 

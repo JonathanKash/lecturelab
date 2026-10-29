@@ -2631,3 +2631,34 @@ def test_check_claude_says_what_it_found(ll, monkeypatch):
     assert second["ok"] and "usage limit" in second["message"]
     assert third == {"ok": True, "message": "Signed in and working.", "at": third["at"]}
     assert ll.setup_status()["claude"]["last_check"] == third
+
+
+def test_a_stop_that_times_out_leaves_no_stop_flag_behind(ll, monkeypatch):
+    import cli
+    monkeypatch.setattr(cli, "STOP_FLAG", ll.DATA / "supervisor.stop")
+    monkeypatch.setattr(cli, "_live_server_pid", lambda: None)  # e.g. the port answers for another copy
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli, "ll", ll)
+    held = ll.FileLock(ll.DATA / "supervisor.lock")  # a supervisor that's running and won't stop in time
+    assert held.acquire()
+    try:
+        assert cli.main(["stop"]) == 1
+    finally:
+        held.release()
+    assert not (ll.DATA / "supervisor.stop").exists()
+
+
+def test_stop_and_open_only_count_this_installs_server(ll, monkeypatch, tmp_path):
+    import cli
+    import io
+    answers = {}
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(json.dumps(answers).encode()))
+    answers.update(pid=7, root=str(ll.ROOT))
+    assert cli._live_server_pid() == 7
+    answers.update(root=str(tmp_path / "another-copy"))  # e.g. an installed copy while you run a checkout
+    assert cli._live_server_pid() is None
+    del answers["root"]  # a server from before root was reported
+    assert cli._live_server_pid() == 7
+    from fastapi.testclient import TestClient
+    h = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}").get("/api/health").json()
+    assert h["root"] == str(ll.ROOT)
