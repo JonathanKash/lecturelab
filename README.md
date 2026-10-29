@@ -14,9 +14,45 @@ Turns real lecture recordings into notes, flashcards and quizzes you can study f
 
 In the app you get the notes with timestamps that jump into the recording, Leitner flashcard review, a quiz, Anki export and full-text search across every lecture.
 
-## Setup
+## Install on your laptop
 
-You need Windows 11, Python 3.13, ffmpeg (`winget install ffmpeg`), LibreOffice for PowerPoint decks, and Claude Code signed in to a Max plan.
+You need a Windows 11 laptop and Claude Code signed in to your Claude plan. LectureLab was built and measured on a Max plan (notes for one lecture use about 68k output tokens, see below). Everything else is free, and setup installs it for you.
+
+1. Go to the [latest release](https://github.com/JonathanKash/lecturelab/releases/latest) and, under Assets, download **Source code (zip)**.
+2. Right-click the ZIP and choose **Extract All**. Setup won't run from inside the ZIP.
+3. Open the extracted folder and double-click **setup.cmd**. If Windows warns that it came from the internet, choose Run (or More info, then Run anyway).
+4. Answer its questions. It asks before installing Python 3.13 and ffmpeg with winget, and asks separately about LibreOffice, which you only need for PowerPoint slides. The first run takes 10 minutes or more, most of it downloading Python packages.
+5. LectureLab opens on its Setup page. Add your courses, type your school's Canvas address if you use Canvas, and press "Check Claude's sign-in". The page says what each step still needs.
+
+If Claude Code isn't installed yet, get it from [claude.com/claude-code](https://claude.com/claude-code) and run `claude` once in a terminal to sign in. Recordings still come in and get transcribed without it; notes wait until it works.
+
+After that, LectureLab starts by itself when you log in, and the desktop shortcut opens it.
+
+**Where things live**
+
+- The app: `%LOCALAPPDATA%\Programs\LectureLab`
+- Your recordings, transcripts, settings and Canvas sign-in: its `data` folder
+- Notes as Markdown: `Documents\LectureLab Notes` (you can pick another folder on the Setup page)
+- Drop files here to add them: `Documents\LectureLab Inbox\<COURSE>\`
+
+**Updating or repairing.** Download the newer release, extract it and run its setup.cmd. Your data, settings and notes are kept. Running setup.cmd again also repairs a broken install.
+
+**Removing it.** In PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\LectureLab\.venv\Scripts\lecturelab" stop
+Unregister-ScheduledTask -TaskName 'LectureLab Server', 'LectureLab Sync' -Confirm:$false
+```
+
+Then delete the desktop shortcut and the `%LOCALAPPDATA%\Programs\LectureLab` folder. That folder holds your recordings and transcripts, so copy its `data` folder somewhere first if you want to keep them. Your notes folder isn't touched. The browser LectureLab uses for Canvas is in `%LOCALAPPDATA%\ms-playwright`; delete that too if nothing else of yours uses Playwright.
+
+**If setup stops**, it says why and how to fix it, and the full log is in `%TEMP%\lecturelab-setup.log`. If it says LectureLab already runs from another folder, that's a copy you installed before. Answer yes to move to the new one, or no to leave the old one as it is.
+
+Transcription runs on your laptop's CPU unless you set up Colab, which is much faster and free. See [Colab](#colab) below.
+
+## Run it from a clone
+
+For working on LectureLab itself. You need Windows 11, Python 3.13, ffmpeg (`winget install ffmpeg`), LibreOffice for PowerPoint decks, and Claude Code signed in to a Max plan.
 
 ```powershell
 py -3.13 -m venv .venv
@@ -29,9 +65,13 @@ That registers two scheduled tasks. "LectureLab Server" keeps the app running at
 
 `.\.venv\Scripts\lecturelab shortcut` puts a LectureLab shortcut on your desktop. It opens the app in its own Chrome or Edge window, and starts the server first if it isn't running.
 
-For Colab transcription, install `google-colab-cli` inside WSL Ubuntu and sign it in to your Google account once. Without it everything still works on your CPU, just slower.
+## Colab
 
-For Canvas, click **Connect Canvas** in the app and sign in yourself. LectureLab keeps its own browser profile in `data/browser-profile/`. It never sees or stores your password, and it only reads from Canvas.
+Transcription is much faster on a free Colab GPU. It's optional: without it everything runs on your CPU, just slower. To set it up, install WSL Ubuntu (`wsl --install -d Ubuntu` in PowerShell run as administrator), install `google-colab-cli` inside it, and sign it in to your Google account once. The Transcripts step on the Setup page says which one LectureLab is using.
+
+## Canvas
+
+Type your school's Canvas address on the Setup page (it looks like `school.instructure.com`), then click **Connect Canvas** and sign in yourself. LectureLab keeps its own browser profile in `data/browser-profile/`. It never sees or stores your password, and it only reads from Canvas.
 
 ## Commands
 
