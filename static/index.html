@@ -1781,7 +1781,14 @@ const SR_MISSING = `<div class="empty"><h3>Search isn’t on this server yet</h3
 const snippet = html => String(html ?? "").replace(/<(?!\/?mark>)[^>]*>/g, "")  // the server escapes it and adds <mark>; nothing else gets through
   .replace(/<\/mark>(\s+)<mark>/g, "$1")  // "dynamic scoping" is one match, not two
   .replace(/\.\.\./g, "…");
-const snippetHtml = html => { const s = snippet(html); let depth = 0;  // an unclosed <mark> would bold every row after it
+// Notes are indexed as Markdown: show their words, not the syntax. Jump links go (the row already has its time), whole or
+// cut off at either end of the snippet, and with a searched number marked inside them.
+const notePlain = s => s.replace(/^(…?)[^[\]\n]*\]\(#t=[^)\s]*\)?:?[ \t]*/, "$1").replace(/^(…?)([^[\]\n]*)\]\(#[^)\s]*\)/, "$1$2")
+  .replace(/\[▶[^\]\n]*\]?(?:\(#t=(?:[\d.]|<\/?mark>)*\)?)?:?[ \t]*/g, " ").replace(/\[([^\]]*)\]\([^)\s]*\)/g, "$1")
+  .replace(/&gt;\s*\[![\w-]+\]\s*/g, "").replace(/(^|\n)\s*(?:&gt;\s*)+/g, "$1")
+  .replace(/(^|\n)\s*#{1,6}\s+/g, "$1").replace(/(\s)#{2,6}\s+/g, "$1")  // a lone "#" mid-line is prose ("the # of nodes")
+  .replace(/(^|\n|:\s)\s*[-*+]\s+(?=\S)/g, "$1").replace(/\*\*(?=\S)|(?<=\S)\*\*|`/g, "");  // "x ** 2" stays
+const snippetHtml = (html, kind) => { const s = snippet(kind === "notes" ? notePlain(String(html ?? "")) : html); let depth = 0;  // an unclosed <mark> would bold every row after it
   for (const m of s.matchAll(/<(\/?)mark>/g)) { depth += m[1] ? -1 : 1; if (depth < 0 || depth > 1) break; }
   return depth === 0 ? s : s.replace(/<\/?mark>/g, ""); };
 function searchResults(rows, q) {
@@ -1795,7 +1802,7 @@ function searchResults(rows, q) {
       <p class="sr-meta">${g[0].code ? `<span class="code" translate="no">${esc(g[0].code)}</span>` : ""}<span>${esc(fmtDate(g[0].date))}</span></p>
       <ul>${g.map(r => `<li class="sr-hit"><a href="${r.t != null ? `?${r.kind === "notes" ? "tab=notes&" : ""}t=${+r.t}` : r.kind === "notes" ? "?tab=notes" : ""}#/lecture/${+r.lecture_id}">
         <span class="num">${r.t != null ? fmtTs(r.t) : ""}</span><span class="sr-kind">${esc(SR_KIND[r.kind] || r.kind)}</span>
-        <span class="sr-snip">${snippetHtml(r.snippet_html)}</span></a></li>`).join("")}</ul></li>`).join("")}</ol>`;
+        <span class="sr-snip">${snippetHtml(r.snippet_html, r.kind)}</span></a></li>`).join("")}</ul></li>`).join("")}</ol>`;
 }
 const searchUrl = (q, course) => `/api/search?${new URLSearchParams({ q, limit: "100", ...(course ? { course_id: course } : {}) })}`;
 async function searchNow() {

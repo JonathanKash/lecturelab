@@ -740,7 +740,8 @@ def test_search_ui_against_stubbed_answers(page):
     # Search as you type, grouped by lecture. Only the server's <mark> is HTML; anything else in a snippet is dropped.
     hit = {"lecture_id": 1, "title": "Scoping", "date": "2026-10-16", "code": "COP4020"}
     rows = [{**hit, "kind": "transcript", "t": 638, "snippet_html": "that's <mark>dynamic</mark> <mark>scoping</mark> &lt;b&gt;x&lt;/b&gt; ..."},
-            {**hit, "kind": "notes", "t": 410, "snippet_html": "<mark>dynamic</mark> in the notes<img src=x onerror=alert(1)>"},
+            {**hit, "kind": "notes", "t": 410, "snippet_html": "Names: [▶ 6:50](#t=410): ### **<mark>dynamic</mark>** in the `notes`&lt;img src=x&gt;"
+             "<img src=x onerror=alert(1)>: - &gt; [!tip] see [slide 4](#slide=4) [▶ 7:02](#t=4"},
             {**hit, "lecture_id": 2, "title": "Names", "kind": "slide", "t": None, "snippet_html": "Slide 4: <mark>dynamic</mark>"},
             {**hit, "lecture_id": 2, "title": "Names", "kind": "transcript", "t": 40,
              "snippet_html": "<mark onclick=alert(1)>dynamic</mark> then <mark>unclosed <script>alert(1)</script>"}]
@@ -768,6 +769,15 @@ def test_search_ui_against_stubbed_answers(page):
     # inside a lecture, hits read in time order; matched words next to each other are one match; "..." becomes "…"
     expect(page.locator(".sr-hit").nth(1).locator("mark")).to_have_text("dynamic scoping")
     expect(page.locator(".sr-hit").nth(1)).to_contain_text("<b>x</b> …")
+    # notes are Markdown underneath: the words show, the syntax and the jump links don't
+    expect(page.locator(".sr-hit").first.locator(".sr-snip")).to_have_text("Names: dynamic in the notes<img src=x>: see slide 4")
+    plain = page.evaluate("""cases => cases.map(s => notePlain(s).replace(/\\s+/g, " ").trim())""", [
+        "a [▶ 6:50](#t=<mark>410</mark>): alpha",  # a searched number inside a jump link
+        "…50](#t=410): text", "…see slide 4](#slide=4) more",  # the snippet starts inside a link
+        "Intro\n## Heading\n- item. end.[▶ 1:00](#t=60) Next",
+        "the # of nodes; C# is; x ** 2; __init__; a - b"])  # prose and code that look like Markdown
+    assert plain == ["a alpha", "…text", "…see slide 4 more", "Intro Heading item. end. Next",
+                     "the # of nodes; C# is; x ** 2; __init__; a - b"], plain
     expect(page.locator("#sr-results img, #sr-results script, #sr-results [onclick]")).to_have_count(0)
     expect(page.locator(".sr-hit").nth(3).locator("mark")).to_have_count(0)  # out-of-order marks are dropped, not left open
     expect(page.locator(".sr-hit a").first).to_have_attribute("href", "?tab=notes&t=410#/lecture/1")
