@@ -140,6 +140,27 @@ def test_layout_survives_elements_injected_into_body(page):
         assert page.evaluate("document.documentElement.scrollWidth") <= width
 
 
+def test_note_text_taps_stay_text_on_touch_screens(browser, server):
+    # A jump time's tap area is padded on touch screens, but it must stay around the time, not cover its paragraph.
+    for width in (375, 1024):
+        ctx = browser.new_context(viewport={"width": width, "height": 800}, has_touch=True, is_mobile=True)
+        pg = ctx.new_page()
+        pg.goto(BASE + "/#/courses")
+        expect(pg.locator("#course-nav")).to_contain_text("COP4020")
+        hit = pg.evaluate("""() => {
+          document.querySelector('main').innerHTML = `<section id="pane-notes"><div class="np"><button type="button" class="ts">1:05</button>
+            <p>A note long enough to wrap over a few lines on a phone, so there is text to tap well away from its jump time.</p></div></section>`;
+          const btn = document.querySelector('.np .ts'), p = document.querySelector('.np p').getBoundingClientRect(), ts = btn.getBoundingClientRect();
+          const at = (x, y) => document.elementFromPoint(x, y).className;
+          return { coarse: matchMedia('(pointer: coarse)').matches, onScreen: ts.x >= 0, pos: getComputedStyle(btn).position,
+                   near: at(ts.x + ts.width / 2, ts.y - 6),  // just above the time: still the time, thanks to the padding
+                   text: at(p.x + p.width / 2, p.y + p.height / 2) };  // the paragraph, or the gap between its lines
+        }""")
+        ctx.close()
+        assert hit["coarse"] and hit["onScreen"] and hit["near"] == "ts" and hit["text"] in ("", "np"), (width, hit)
+        assert hit["pos"] == ("relative" if width <= 760 else "absolute"), (width, hit)  # wider screens keep the time in the gutter
+
+
 def test_api_rejects_foreign_host_and_unknown_course(server):
     req = urllib.request.Request(f"{BASE}/api/health", headers={"Host": "evil.example:8766"})
     with pytest.raises(urllib.error.HTTPError) as e:
