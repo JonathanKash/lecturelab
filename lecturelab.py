@@ -5080,6 +5080,71 @@ def offline_notes(lecture_id: int) -> dict:
 
 
 
+# ---------------------------------------------------------------- setup
+def _found(tool: str) -> bool:
+    try:
+        return bool(find_tool(tool))
+    except FileNotFoundError:
+        return False
+
+
+def _writable(folder: Path) -> bool:
+    """Without creating anything: the folder, or the nearest part of it that exists."""
+    p = folder
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    return p.is_dir() and os.access(p, os.W_OK)
+
+
+def setup_status() -> dict:
+    """Everything the setup screen shows, cheap enough to read on every visit: nothing here starts
+    WSL, a browser or Claude. Claude's sign-in is the last check you ran (check_claude)."""
+    with db() as con:
+        courses = con.execute("SELECT COUNT(*) FROM courses").fetchone()[0]
+        lectures = con.execute("SELECT COUNT(*) FROM lectures").fetchone()[0]
+        colab_ok = con.execute("SELECT 1 FROM transcribe_batches WHERE mode='colab' AND ok=1 LIMIT 1").fetchone()
+    try:
+        claude_installed = bool(claude_exe())
+    except ClaudeError:
+        claude_installed = False
+    folder = notes_dir()
+    return {
+        "first_run": not courses and not lectures,
+        "courses": courses,
+        "lectures": lectures,
+        "ffmpeg": _found("ffmpeg") and _found("ffprobe"),
+        "libreoffice": _found("soffice"),  # only for PowerPoint decks
+        "claude": {"installed": claude_installed, "off": os.environ.get("LECTURELAB_CLAUDE") == "off",
+                   "last_check": meta_get("claude_check")},
+        "colab": {"enabled": COLAB_ENABLED, "worked": bool(colab_ok)},
+        "canvas": {"base": setting("canvas_base") or None, "state": canvas_state().get("state")},
+        "notes_dir": {"path": str(folder), "writable": _writable(folder)},
+        "inbox": str(LOCAL_INBOX),
+        "disk_free_gb": round(shutil.disk_usage(DATA if DATA.exists() else HOME).free / 1e9, 1),
+        # a value set in the environment (or .env) beats the app's, so the screen says so
+        "overridden": [n for n, (env, _) in SETTINGS.items() if os.environ.get(env)],
+    }
+
+
+def check_claude() -> dict:
+    """One tiny real call, to prove Claude Code is signed in to a plan. Only when you ask: it uses a
+    few hundred tokens of the plan. The time in the prompt keeps it from being answered from cache."""
+    at = datetime.now().isoformat(timespec="seconds")
+    try:
+        claude_call(f"Reply with the single word OK. (LectureLab sign-in check, {at})",
+                    system="You are a connectivity check. Reply with exactly: OK", kind="setup-check")
+        result = {"ok": True, "message": "Signed in and working."}
+    except ClaudeUnavailable as e:  # before QuotaExceeded: it's a subclass
+        result = {"ok": False, "message": str(e)}
+    except QuotaExceeded as e:
+        result = {"ok": True, "message": f"Signed in. The plan's usage limit is reached for now: {e}"}
+    except ClaudeError as e:
+        result = {"ok": False, "message": str(e)}
+    result["at"] = at
+    meta_set("claude_check", result)
+    return result
+
+
 # ---------------------------------------------------------------- export and sync
 
 def notes_dir() -> Path:
@@ -5369,6 +5434,11 @@ class CoursePatch(BaseModel):
     vocabulary: str | None = None
 
 
+class SettingsIn(BaseModel):
+    canvas_base: str | None = None
+    notes_dir: str | None = None
+
+
 class CourseIn(BaseModel):
     code: str
     name: str = ""
@@ -5534,6 +5604,26 @@ def create_app():
     @app.get("/api/courses")
     def api_courses():
         return list_courses()
+
+    @app.get("/api/setup")
+    def api_setup():
+        return setup_status()
+
+    @app.put("/api/settings")
+    def api_settings(body: SettingsIn):
+        errors = {}
+        for name, value in body.model_dump(exclude_unset=True).items():
+            try:
+                set_setting(name, value)
+            except ValueError as e:
+                errors[name] = str(e)
+        if errors:  # each message goes next to its field
+            raise HTTPException(400, {"fields": errors})
+        return setup_status()
+
+    @app.post("/api/setup/check-claude")
+    def api_check_claude():
+        return check_claude()
 
     @app.post("/api/courses")
     def api_add_course(body: CourseIn):

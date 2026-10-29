@@ -2592,3 +2592,42 @@ def test_canvas_courses_suggest_a_code(ll, monkeypatch):
     monkeypatch.setattr(ll, "canvas_get", lambda *a, **k: listed)
     got = {c["canvas_id"]: c["suggested_code"] for c in ll.canvas_courses()}
     assert got == {1: "COP4020", 2: "CS101", 3: None}  # no code in it: you type one
+
+
+def test_setup_status_and_settings(ll, monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    monkeypatch.delenv("CANVAS_BASE_URL")
+    monkeypatch.delenv("LECTURELAB_NOTES_DIR")
+    monkeypatch.setattr(ll, "claude_exe", lambda: "claude.exe")
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    st = c.get("/api/setup").json()
+    assert st["courses"] == 6 and not st["first_run"]  # the tests' seeded courses
+    assert st["canvas"] == {"base": None, "state": "not_connected"} and st["claude"]["installed"]
+    assert st["overridden"] == [] and st["notes_dir"]["path"].endswith("LectureLab Notes")
+    # both fields saved together; a bad one is reported by name and the good one still saves
+    r = c.put("/api/settings", json={"canvas_base": "http://x.instructure.com", "notes_dir": str(tmp_path / "N")})
+    assert r.status_code == 400 and "https://" in r.json()["detail"]["fields"]["canvas_base"]
+    assert ll.notes_dir() == tmp_path / "N"
+    st = c.put("/api/settings", json={"canvas_base": "school.instructure.com"}).json()
+    assert st["canvas"]["base"] == "https://school.instructure.com" and st["notes_dir"]["writable"]
+    monkeypatch.setenv("CANVAS_BASE_URL", "https://ufl.instructure.com")
+    assert c.get("/api/setup").json()["overridden"] == ["canvas_base"]
+    assert c.put("/api/settings", json={"notes_dir": "x"}, headers={"origin": "https://evil.example"}).status_code == 403
+
+
+def test_check_claude_says_what_it_found(ll, monkeypatch):
+    answers = iter([ll.ClaudeUnavailable("Claude Code isn't signed in. Run claude and log in.", 0),
+                    ll.QuotaExceeded("resets 3pm", 0), "OK"])
+
+    def fake(prompt, **k):
+        assert "sign-in check" in prompt and k["kind"] == "setup-check"
+        a = next(answers)
+        if isinstance(a, Exception):
+            raise a
+        return a
+    monkeypatch.setattr(ll, "claude_call", fake)
+    first, second, third = ll.check_claude(), ll.check_claude(), ll.check_claude()
+    assert not first["ok"] and "isn't signed in" in first["message"]
+    assert second["ok"] and "usage limit" in second["message"]
+    assert third == {"ok": True, "message": "Signed in and working.", "at": third["at"]}
+    assert ll.setup_status()["claude"]["last_check"] == third
