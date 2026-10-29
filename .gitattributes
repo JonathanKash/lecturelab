@@ -1,0 +1,4 @@
+# The release ZIP comes from the repo as stored. cmd.exe misreads LF-only batch files, so these
+# stay CRLF wherever they're checked out or downloaded.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
