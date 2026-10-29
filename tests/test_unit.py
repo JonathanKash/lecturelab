@@ -1830,7 +1830,7 @@ def test_notes_export_to_ai_notes_with_frontmatter_and_links_back(ll, monkeypatc
         con.execute("UPDATE lectures SET date='2026-09-01', title='Grammars: BNF \"and\" more' WHERE id=?", (lid,))
         con.execute("INSERT INTO sources(lecture_id, kind, url) VALUES (?, 'url', 'https://example.edu/rec/1')", (lid,))
     notes, tr = ll.export_lecture(lid)
-    assert notes.parent == ll.NOTES_DIR / "COP4020"
+    assert notes.parent == ll.notes_dir() / "COP4020"
     assert notes.name == "2026-09-01 - Grammars_ BNF _and_ more.md"
     assert tr.name == "2026-09-01 - Grammars_ BNF _and_ more - Transcript.md"
     md = notes.read_text(encoding="utf-8")
@@ -1847,9 +1847,9 @@ def test_notes_export_to_ai_notes_with_frontmatter_and_links_back(ll, monkeypatc
     new_notes, new_tr = ll.export_lecture(lid)
     assert new_notes.exists() and not notes.exists() and not tr.exists()
     assert ll.get_lecture(lid)["status"] == "exported"
-    (ll.NOTES_DIR / "COP4020" / "mine.md").write_text("my own file", encoding="utf-8")
+    (ll.notes_dir() / "COP4020" / "mine.md").write_text("my own file", encoding="utf-8")
     ll.export_lecture(lid)
-    assert (ll.NOTES_DIR / "COP4020" / "mine.md").exists()  # only files LectureLab wrote are ever removed
+    assert (ll.notes_dir() / "COP4020" / "mine.md").exists()  # only files LectureLab wrote are ever removed
 
 
 def test_export_pending_catches_up_after_a_failed_export(ll, monkeypatch):
@@ -2482,3 +2482,70 @@ def test_shortcut_icon_has_every_size_windows_asks_for(tmp_path):
     from PIL import Image
     with Image.open(cli.write_icon(tmp_path / "x.ico")) as ico:
         assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= set(ico.info["sizes"])
+
+
+def test_a_new_install_starts_without_anyones_courses_or_school(ll, monkeypatch):
+    monkeypatch.delenv("LECTURELAB_SEED_COURSES")
+    monkeypatch.delenv("CANVAS_BASE_URL")
+    monkeypatch.delenv("LECTURELAB_NOTES_DIR")
+    ll._db_ready = False
+    (ll.DATA / "lecturelab.db").unlink(missing_ok=True)
+    assert ll.list_courses() == []
+    with pytest.raises(ll.CanvasError, match="add your school's Canvas address"):
+        ll.canvas_ready()
+    assert ll.notes_dir() == ll.HOME / "Documents" / "LectureLab Notes"
+
+
+def test_settings_are_checked_and_an_environment_variable_still_wins(ll, monkeypatch, tmp_path):
+    monkeypatch.delenv("CANVAS_BASE_URL")
+    for typed in ("school.instructure.com", "https://School.Instructure.com/courses/12/modules", " canvas.school.edu/ "):
+        assert ll.set_setting("canvas_base", typed) == "https://" + typed.strip().split("//")[-1].split("/")[0].lower()
+    for bad, says in (("http://school.instructure.com", "https://"), ("my school", "isn't a Canvas address"),
+                      ("https://me:pw@school.instructure.com", "isn't a Canvas address"), ("https://[::1", "isn't")):
+        with pytest.raises(ValueError, match=says):
+            ll.set_setting("canvas_base", bad)
+    assert ll.canvas_base() == "https://canvas.school.edu"  # a refused value leaves the last good one
+    monkeypatch.setenv("CANVAS_BASE_URL", "https://ufl.instructure.com")
+    assert ll.canvas_base() == "https://ufl.instructure.com"
+    folder = tmp_path / "My Notes"
+    monkeypatch.delenv("LECTURELAB_NOTES_DIR")
+    assert ll.set_setting("notes_dir", str(folder)) == str(folder) and folder.is_dir() and not list(folder.iterdir())
+    with pytest.raises(ValueError, match="whole folder path"):
+        ll.set_setting("notes_dir", "Notes")
+    ll.set_setting("notes_dir", "")  # back to the default
+    assert ll.notes_dir() == ll.HOME / "Documents" / "LectureLab Notes"
+
+
+def test_an_install_from_before_settings_keeps_its_canvas_and_notes_folder(ll, monkeypatch):
+    monkeypatch.delenv("CANVAS_BASE_URL")
+    monkeypatch.delenv("LECTURELAB_NOTES_DIR")
+    ll.list_courses()  # a database at the newest version
+    with ll.db() as con:  # rewind it to before settings existed
+        con.execute("DELETE FROM meta WHERE key LIKE 'setting:%'")
+        con.execute("PRAGMA user_version=10")
+    ll._db_ready = False
+    ll.init_db()
+    assert ll.canvas_base() == "https://ufl.instructure.com"
+    assert ll.notes_dir() == ll.HOME / "Documents" / "AI Notes" / "Lectures"
+
+
+def test_canvas_address_details(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.delenv("CANVAS_BASE_URL")
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    r = c.post("/api/canvas/connect")  # no school yet: a reason, not "opened" and no window
+    assert r.status_code == 400 and "Canvas address" in r.json()["detail"]
+    assert ll.set_setting("canvas_base", "school.instructure.com:443") == "https://school.instructure.com"
+    with pytest.raises(ValueError, match="isn't a Canvas address"):
+        ll.set_setting("canvas_base", "127.0.0.1")
+    # a school with Canvas on its own domain: its links are Canvas links, and get the session cookies
+    ll.set_canvas_state("connected")
+    with ll.db() as con:
+        con.execute("UPDATE courses SET canvas_id=575149 WHERE code='COP4020'")
+    ll.set_setting("canvas_base", "canvas.school.edu")
+    assert ll.classify_url("https://canvas.school.edu/courses/1/files/2") == "canvas"
+    assert ll.needs_login_cookies("https://canvas.school.edu/media_objects/m-1")
+    assert not ll.needs_login_cookies("https://canvas.school.edu.evil.example/x")
+    # and switching schools drops the old session and course links
+    assert ll.canvas_state()["state"] == "not_connected"
+    assert ll.find_course("COP4020")["canvas_id"] is None

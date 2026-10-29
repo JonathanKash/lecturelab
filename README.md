@@ -10,7 +10,7 @@ Turns real lecture recordings into notes, flashcards and quizzes you can study f
 4. **Writes notes with Claude Code** on your Max plan.
    - Sonnet writes an outline, then each section from its slice of the transcript and its slides, then a summary, flashcards and a quiz.
    - Opus checks all of it against the transcript and removes or flags anything the lecture doesn't support.
-5. **Exports Markdown** to `Documents\AI Notes\Lectures\<Course>\`: one notes file and one transcript per lecture. Anything that indexes that folder picks them up.
+5. **Exports Markdown** to `Documents\LectureLab Notes\<Course>\` (or a folder you pick): one notes file and one transcript per lecture. Anything that indexes that folder picks them up.
 
 In the app you get the notes with timestamps that jump into the recording, Leitner flashcard review, a quiz, Anki export and full-text search across every lecture.
 

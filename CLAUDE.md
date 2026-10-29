@@ -12,7 +12,7 @@ Turns real lecture recordings into notes, flashcards and quizzes good enough to 
   - Calls are isolated (`--setting-sources= --strict-mcp-config --tools= --no-session-persistence`, cwd `data/claude-work`) so the user's hooks, MCP servers and CLAUDE.md don't leak in: about 600 context tokens instead of 53k. The prompt goes on stdin (Windows caps the command line at 32 KB).
   - One claude process at a time (`LECTURELAB_CLAUDE_PARALLEL`): the laptop is short on RAM.
   - Tests never reach the real `claude`: `tests/conftest.py` sets `LECTURELAB_CLAUDE=off` and `LECTURELAB_AUTO_NOTES=off`, which e2e servers inherit. Unit tests fake `claude` instead.
-- **Exports go to `Documents\AI Notes\Lectures`**, which the user's Recall knowledge base indexes. Tests must point `LECTURELAB_NOTES_DIR` at a temp dir (the `ll` fixture does), never at the real folder. An export only ever deletes files it wrote itself (`notes.export_paths`).
+- **On this laptop exports go to `Documents\AI Notes\Lectures`**, which the user's Recall knowledge base indexes. It's the `notes_dir` setting in the database: new installs default to `Documents\LectureLab Notes`, and installs from before settings keep AI Notes. The Canvas address is a setting too. Tests must point `LECTURELAB_NOTES_DIR` at a temp dir (the `ll` fixture does), never at the real folder. An export only ever deletes files it wrote itself (`notes.export_paths`).
 - **Transcription runs on a Colab GPU** through the official Colab CLI (`google-colab-cli`) inside WSL Ubuntu.
   - Call it with `wsl.exe -d Ubuntu -e ...`. The default distro is docker-desktop, so always name Ubuntu.
   - One Colab session per batch, and `colab stop` always runs in a `finally` block.

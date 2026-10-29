@@ -293,6 +293,7 @@ def cmd_canvas_status(args) -> int:
     """Check the Canvas session (one GET /api/v1/users/self). Never signs in on its own."""
     ll.setup_logging(console=False)
     try:
+        ll.canvas_base()  # no school set: say so before starting a browser
         # Never connected: a signed-out answer is expected, so don't call it an expired session.
         quiet = ll.canvas_state().get("state") == "not_connected"
         with ll.CanvasSession() as cs:

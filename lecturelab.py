@@ -465,6 +465,10 @@ MIGRATIONS = [
     UPDATE canvas_items SET status='ignored', lecture_id=NULL WHERE status='pulled'
         AND (lecture_id IS NULL OR lecture_id NOT IN (SELECT id FROM lectures));
     """,
+    # 11: the Canvas address and notes folder became settings (init_db keeps an older install's values)
+    """
+    SELECT 1;
+    """,
 ]
 
 # Lecture lifecycle. Stages add work for each step; the UI shows these as chips.
@@ -642,8 +646,17 @@ def init_db() -> None:
                     continue
                 con.executescript(f"BEGIN; {sql}; PRAGMA user_version={n}; COMMIT;")
                 log.info("db migrated to version %s", n)
-                if n == 1:  # seed once, so a course you delete later stays deleted
+                # Seed once, so a course you delete later stays deleted. Only on request: they're one
+                # student's UF courses, used by the tests. Everyone else adds their own.
+                if n == 1 and os.environ.get("LECTURELAB_SEED_COURSES") == "uf":
                     con.executemany("INSERT OR IGNORE INTO courses(code, name, vocabulary) VALUES (?,?,?)", SEED_COURSES)
+                    con.commit()
+                # An install from before settings existed used UF's Canvas and AI Notes\Lectures: keep
+                # them, or the next sync would move every export and Canvas would stop. New installs skip this.
+                if n == 11 and version:
+                    con.executemany("INSERT OR IGNORE INTO meta(key, value) VALUES (?,?)", [
+                        ("setting:canvas_base", json.dumps("https://ufl.instructure.com")),
+                        ("setting:notes_dir", json.dumps(str(HOME / "Documents" / "AI Notes" / "Lectures")))])
                     con.commit()
         finally:
             con.close()
@@ -1096,9 +1109,15 @@ def classify_url(url: str) -> str:
         return "drive"
     if host.endswith(("zoom.us", "zoom.com")):
         return "zoom"
-    if host.endswith("instructure.com"):
+    if host.endswith("instructure.com") or host == _canvas_host():
         return "canvas"
     return "url"
+
+
+def _canvas_host() -> str:
+    """The configured Canvas site's host (some schools use canvas.school.edu), or "" if none."""
+    from urllib.parse import urlsplit
+    return (urlsplit(setting("canvas_base")).hostname or "").lower()
 
 
 _DRIVE_FILE_ID = re.compile(r"(?:/file/(?:u/\d+/)?d/|[?&]id=)([\w-]{20,})")
@@ -1186,7 +1205,8 @@ def needs_login_cookies(url: str) -> bool:
     from urllib.parse import urlsplit
     u = urlsplit(url)
     host = (u.hostname or "").lower()
-    return any(host == h or host.endswith("." + h) for h in _LOGIN_HOSTS) or "/mediasite/" in u.path.lower()
+    return (any(host == h or host.endswith("." + h) for h in _LOGIN_HOSTS) or "/mediasite/" in u.path.lower()
+            or bool(host) and host == _canvas_host())
 
 
 def job_cookie_file(job_id: int) -> Path:
@@ -1484,10 +1504,18 @@ class CanvasNeedsSignIn(CanvasError):
     pass
 
 
-# UF students can't make API tokens, so LectureLab keeps its own browser profile: you sign in
-# there once with GatorLink + Duo, and LectureLab reads the Canvas API with that session the way
-# Canvas's own web pages do (GET only). No password is ever asked for or stored.
-CANVAS_BASE = os.environ.get("CANVAS_BASE_URL", "https://ufl.instructure.com").rstrip("/")
+# Many schools (UF among them) don't let students make API tokens, so LectureLab keeps its own
+# browser profile: you sign in there once with your school login, and LectureLab reads the Canvas
+# API with that session the way Canvas's own web pages do (GET only). No password is ever asked
+# for or stored.
+def canvas_base() -> str:
+    """Your school's Canvas, like https://school.instructure.com. Raises until it's set."""
+    base = setting("canvas_base").rstrip("/")
+    if not base:
+        raise CanvasError("Canvas isn't set up: add your school's Canvas address first.")
+    return base
+
+
 PROFILE_DIR = DATA / "browser-profile"
 # Canvas and UF login use session-only cookies, which Chromium drops when the browser closes.
 # They're kept here between launches so one sign-in lasts until Canvas itself expires it.
@@ -1607,12 +1635,13 @@ class CanvasSession:
         quiet_auth: a signed-out answer raises without marking Canvas 'needs sign-in' (used
         while you're signing in, so it doesn't notify you mid-login)."""
         from urllib.parse import urlencode
+        base = canvas_base()
         if path.startswith("http"):
-            if not path.startswith(CANVAS_BASE + "/api/v1/"):
+            if not path.startswith(base + "/api/v1/"):
                 raise CanvasError(f"refusing a non-API Canvas URL: {path}")
             url = path
         else:
-            url = f"{CANVAS_BASE}/api/v1/{path.lstrip('/')}?" + urlencode({"per_page": 100, **(params or {})}, doseq=True)
+            url = f"{base}/api/v1/{path.lstrip('/')}?" + urlencode({"per_page": 100, **(params or {})}, doseq=True)
         out = []
         while url:
             for attempt in range(5):
@@ -1728,9 +1757,10 @@ def canvas_get(path: str, params: dict | None = None, paginate: bool = True):
 def canvas_login(timeout_min: float = 10) -> dict:
     """Open the LectureLab browser so you can sign in with GatorLink + Duo yourself. Returns once
     the Canvas API answers as you, or after timeout_min. Never fills in anything."""
+    base = canvas_base()  # no school set: say so before opening a browser
     with CanvasSession(headless=False) as cs:
         page = cs.ctx.pages[0] if cs.ctx.pages else cs.ctx.new_page()
-        page.goto(CANVAS_BASE + "/", wait_until="domcontentloaded")
+        page.goto(base + "/", wait_until="domcontentloaded")
         end = time.time() + timeout_min * 60
         while time.time() < end:
             try:
@@ -1910,7 +1940,7 @@ def _canvas_scan_course(course: dict, progress=None) -> dict:
             for m in scan_html_for_media(p.get("body") or "", f"page: {p.get('title')}"):
                 m.setdefault("title", p.get("title"))
                 m.setdefault("created_at", p.get("created_at"))
-                m["page_link"] = p.get("html_url") or f"{CANVAS_BASE}/courses/{cid}/pages/{slug}"
+                m["page_link"] = p.get("html_url") or f"{canvas_base()}/courses/{cid}/pages/{slug}"
                 add(m)
     say("announcements")
     for a in canvas_get(f"courses/{cid}/discussion_topics", {"only_announcements": "true"}):
@@ -1978,7 +2008,7 @@ def stream_download(url: str, out: Path, jar=None, max_bytes: int | None = None)
 
 def canvas_source_url(it: dict) -> str:
     """A real link for the lecture's source, not the internal downloader handle."""
-    base = CANVAS_BASE
+    base = canvas_base()
     course = find_course(it["course_id"]) or {}
     if it["kind"] == "file":
         return f"{base}/courses/{course.get('canvas_id')}/files/{it['url'].split(':', 1)[1]}"
@@ -2086,6 +2116,7 @@ def job_canvas_scan(job: dict) -> dict:
 
 def canvas_ready() -> None:
     """Raise a clear error unless the LectureLab browser has a Canvas session."""
+    canvas_base()  # no school set yet: say that, not "connect"
     st = canvas_state().get("state")
     if st == "not_connected":
         raise CanvasError("Canvas isn't connected yet: click Connect Canvas and sign in with GatorLink.")
@@ -2139,6 +2170,64 @@ def meta_get(key: str, default=None):
 def meta_set(key: str, value) -> None:
     with db() as con:
         con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (key, json.dumps(value)))
+
+
+# ---------------------------------------------------------------- settings
+# What the setup screen changes. Kept in the database, so a change applies without a restart; an
+# environment variable (or .env) still wins, for the tests and anyone who prefers a file.
+SETTINGS = {  # name: (environment variable, default)
+    "canvas_base": ("CANVAS_BASE_URL", ""),  # no default school: you add yours
+    "notes_dir": ("LECTURELAB_NOTES_DIR", str(HOME / "Documents" / "LectureLab Notes")),
+}
+
+
+def setting(name: str) -> str:
+    env, default = SETTINGS[name]
+    return os.environ.get(env) or meta_get(f"setting:{name}") or default
+
+
+def set_setting(name: str, value: str | None) -> str:
+    """Check and store one setting. Empty goes back to the default. Returns the value now in effect."""
+    value = (value or "").strip()
+    if value:
+        value = {"canvas_base": _clean_canvas_base, "notes_dir": _check_notes_dir}[name](value)
+    before = setting(name)
+    meta_set(f"setting:{name}", value or None)
+    if name == "canvas_base" and setting(name) != before:  # another school: its session and course ids don't carry over
+        set_canvas_state("not_connected")
+        with db() as con:
+            con.execute("UPDATE courses SET canvas_id=NULL")
+    return setting(name)
+
+
+def _clean_canvas_base(v: str) -> str:
+    """"school.instructure.com", a pasted Canvas page or the full address: the site's root."""
+    from urllib.parse import urlsplit
+    bad = ValueError("That isn't a Canvas address. It looks like school.instructure.com.")
+    try:
+        u = urlsplit(v if "://" in v else f"https://{v}")
+        host, port = (u.hostname or "").lower(), u.port
+    except ValueError:
+        raise bad from None
+    if u.scheme == "http":
+        raise ValueError("Canvas addresses start with https://, not http://.")
+    if u.scheme != "https" or u.username or u.password or not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}", host):
+        raise bad
+    return f"https://{host}" + (f":{port}" if port and port != 443 else "")  # Canvas's own links leave :443 out
+
+
+def _check_notes_dir(v: str) -> str:
+    p = Path(os.path.expandvars(v)).expanduser()
+    if not p.is_absolute():
+        raise ValueError("Give the whole folder path, starting with the drive, like C:\\Users\\you\\Documents\\Notes.")
+    try:  # made now, and written to once, so a bad choice shows up here and not at the next export
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / f".lecturelab-write-test-{os.getpid()}-{threading.get_ident()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        raise ValueError(f"LectureLab can't write to that folder ({e.strerror or e}). Pick another one.") from None
+    return str(p)
 
 
 def initial_prompt(lecture: dict) -> str:
@@ -4940,8 +5029,10 @@ def offline_notes(lecture_id: int) -> dict:
 
 # ---------------------------------------------------------------- export and sync
 
-# Notes land where Recall already indexes: AI Notes\Lectures\<Course>\<date> - <Title>.md
-NOTES_DIR = Path(os.environ.get("LECTURELAB_NOTES_DIR", Path.home() / "Documents" / "AI Notes" / "Lectures"))
+def notes_dir() -> Path:
+    """Where notes are exported: <folder>\\<Course>\\<date> - <Title>.md. Point it at a folder your
+    notes app or search tool indexes (the original install uses AI Notes\\Lectures, for Recall)."""
+    return Path(setting("notes_dir"))
 
 
 def fmt_hms(sec: float) -> str:
@@ -4957,7 +5048,7 @@ def _export_name(s: str) -> str:
 def export_paths(lec: dict, taken: set[str] = frozenset()) -> tuple[Path, Path]:
     """Where a lecture's notes and transcript go. Two lectures with the same date and title get the
     lecture id added rather than overwrite each other ("taken": other lectures' files, lowercase)."""
-    folder = NOTES_DIR / (_export_name(lec["course_code"] or "") or "Unsorted")
+    folder = notes_dir() / (_export_name(lec["course_code"] or "") or "Unsorted")
     date = lec["date"] or (lec["created_at"] or "")[:10]
     base = _export_name(f"{date} - {lec['title']}") or f"Lecture {lec['id']}"
     if str(folder / f"{base}.md").lower() in taken:
@@ -5135,7 +5226,7 @@ def run_sync(say=lambda m: None) -> dict:
             if errors:
                 did["canvas"] = " ".join(errors)
         else:
-            did["canvas"] = "needs sign-in"
+            did["canvas"] = "needs sign-in" if setting("canvas_base") else "not set up"
         say("inbox folders")
         # this process lives for one scan, so it can't wait for a second sighting of a file;
         # a file still being copied is skipped either way
@@ -5502,10 +5593,14 @@ def create_app():
         busy = not lk.acquire()
         if not busy:
             lk.release()
-        return {**st, "browser_busy": busy, "base": CANVAS_BASE}
+        return {**st, "browser_busy": busy, "base": setting("canvas_base") or None}
 
     @app.post("/api/canvas/connect")
     def api_canvas_connect():
+        try:
+            canvas_base()  # the sign-in window would die at once without it
+        except CanvasError as e:
+            raise HTTPException(400, str(e))
         lk = FileLock(DATA / "browser.lock")
         if not lk.acquire():
             raise HTTPException(409, "The LectureLab browser is already open; finish signing in there.")
