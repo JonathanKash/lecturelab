@@ -692,6 +692,57 @@ def update_course(course_id: int, name: str | None = None, vocabulary: str | Non
         return dict(con.execute("SELECT * FROM courses WHERE id=?", (course_id,)).fetchone())
 
 
+# Recordings find their course by its code: in a title, a file name or an inbox folder name. So a
+# code is short, has no spaces ("CS 101" is stored as CS101) and is safe as a folder name.
+COURSE_CODE_RE = re.compile(r"(?=.*[A-Z])[A-Z0-9][A-Z0-9._-]{2,19}")
+
+
+def clean_course_code(code: str) -> str:
+    code = re.sub(r"\s+", "", code or "").upper()
+    if not COURSE_CODE_RE.fullmatch(code):
+        raise ValueError("A course code is 3 to 20 letters and digits with at least one letter, like COP4020 or CS101.")
+    return code
+
+
+def add_course(code: str, name: str = "", vocabulary: str = "", canvas_id: int | None = None) -> dict:
+    code = clean_course_code(code)
+    name = " ".join((name or "").split()) or code
+    if len(name) > TITLE_MAX:
+        raise ValueError(f"course name can be at most {TITLE_MAX} characters")
+    terms = "\n".join(t.strip() for t in (vocabulary or "").splitlines() if t.strip())
+    with db() as con:
+        if con.execute("SELECT 1 FROM courses WHERE upper(code)=?", (code,)).fetchone():
+            raise ValueError(f"You already have a course {code}.")
+        try:
+            cid = con.execute("INSERT INTO courses(code, name, vocabulary, canvas_id) VALUES (?,?,?,?)",
+                              (code, name, terms, canvas_id)).lastrowid
+        except sqlite3.IntegrityError:  # added by another request a moment ago
+            raise ValueError(f"You already have a course {code}.") from None
+    log.info("added course %s (%s)", code, name)
+    return find_course(cid)
+
+
+def delete_course(course_id: int) -> None:
+    """Only a course with no lectures: they'd lose their course without you choosing a new one.
+    Its slide decks go with it, files included."""
+    with db() as con:
+        c = con.execute("SELECT code FROM courses WHERE id=?", (course_id,)).fetchone()
+        if not c:
+            raise KeyError(course_id)
+        n = con.execute("SELECT COUNT(*) FROM lectures WHERE course_id=?", (course_id,)).fetchone()[0]
+        if n:
+            raise ValueError(f"{c['code']} still has {n} lecture{'' if n == 1 else 's'}. "
+                             "Move them to another course or delete them first.")
+        decks = rows(con.execute("SELECT id, path FROM decks WHERE course_id=?", (course_id,)))
+        con.execute("DELETE FROM courses WHERE id=?", (course_id,))  # decks and Canvas items cascade
+        kept = {r[0] for r in con.execute("SELECT path FROM decks WHERE path IS NOT NULL")}
+    for d in decks:
+        shutil.rmtree(SLIDE_IMAGES / str(d["id"]), ignore_errors=True)
+        if d["path"] and d["path"] not in kept and (DATA / d["path"]).resolve().is_relative_to(DATA):
+            (DATA / d["path"]).unlink(missing_ok=True)
+    log.info("deleted course %s", c["code"])
+
+
 def find_course(key: str | int | None) -> dict | None:
     """Course by id (int), or by code or name (str, case-insensitive). Inbox folder names go
     through here as strings, so a folder called '2024' is never mistaken for course id 2024."""
@@ -1789,7 +1840,9 @@ def canvas_courses() -> list[dict]:
             continue
         blob = f"{c.get('course_code', '')} {c.get('name', '')}".upper().replace(" ", "")
         match = next((m for m in mine if m["code"].upper() in blob), None)
+        m = re.search(r"\b([A-Z]{2,4})\s?(\d{3,4}[A-Z]?)\b", f"{c.get('course_code', '')} {c['name']}".upper())
         out.append({"canvas_id": c["id"], "name": c["name"], "code": c.get("course_code"),
+                    "suggested_code": m and m[1] + m[2],  # "COP 4020-12345 (Fall)" -> COP4020
                     "term": (c.get("term") or {}).get("name"), "course_id": match and match["id"],
                     "course_code": match and match["code"]})
         if match and match["canvas_id"] != c["id"]:
@@ -5316,6 +5369,13 @@ class CoursePatch(BaseModel):
     vocabulary: str | None = None
 
 
+class CourseIn(BaseModel):
+    code: str
+    name: str = ""
+    vocabulary: str = ""
+    canvas_id: int | None = None
+
+
 class RecordingIn(BaseModel):
     url: str
     course_id: int | None = None
@@ -5474,6 +5534,23 @@ def create_app():
     @app.get("/api/courses")
     def api_courses():
         return list_courses()
+
+    @app.post("/api/courses")
+    def api_add_course(body: CourseIn):
+        try:
+            return add_course(body.code, body.name, body.vocabulary, body.canvas_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.delete("/api/courses/{course_id}")
+    def api_delete_course(course_id: int):
+        try:
+            delete_course(course_id)
+        except KeyError:
+            raise HTTPException(404, "course not found")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
 
     @app.put("/api/courses/{course_id}")
     def api_update_course(course_id: int, body: CoursePatch):

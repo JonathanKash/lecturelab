@@ -2549,3 +2549,46 @@ def test_canvas_address_details(ll, monkeypatch):
     # and switching schools drops the old session and course links
     assert ll.canvas_state()["state"] == "not_connected"
     assert ll.find_course("COP4020")["canvas_id"] is None
+
+
+def test_add_and_delete_courses(ll):
+    from fastapi.testclient import TestClient
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    r = c.post("/api/courses", json={"code": " cs 101 ", "name": "  Intro   to CS ", "vocabulary": "loop\n\n recursion "})
+    assert r.status_code == 200
+    made = r.json()
+    assert (made["code"], made["name"], made["vocabulary"]) == ("CS101", "Intro to CS", "loop\nrecursion")
+    assert c.post("/api/courses", json={"code": "MATH2", "canvas_id": 42}).json()["name"] == "MATH2"  # name defaults to the code
+    assert ll.find_course("MATH2")["canvas_id"] == 42
+    for bad, says in (("CS101", "already have"), ("cs101", "already have"), ("AB", "3 to 20"), ("1234", "one letter"),
+                      ("CS/101", "letters and digits"), ("X" * 21, "3 to 20")):
+        r = c.post("/api/courses", json={"code": bad})
+        assert r.status_code == 400 and says in r.json()["detail"], (bad, r.json())
+    assert c.post("/api/courses", json={"code": "LONG1", "name": "n" * 301}).status_code == 400
+    # a course with lectures stays; an empty one goes, with its slide decks
+    lid = _lecture(ll, "transcribed")
+    with ll.db() as con:
+        con.execute("UPDATE lectures SET course_id=? WHERE id=?", (made["id"], lid))
+        did = con.execute("INSERT INTO decks(course_id, key, source, title, path, status) VALUES "
+                          "(?, 'upload:a', 'upload', 'Week 1', 'Slides/CS101/w1.pdf', 'ready')", (made["id"],)).lastrowid
+    (ll.DATA / "Slides" / "CS101").mkdir(parents=True)
+    (ll.DATA / "Slides" / "CS101" / "w1.pdf").write_bytes(b"%PDF")
+    (ll.SLIDE_IMAGES / str(did)).mkdir(parents=True)
+    r = c.delete(f"/api/courses/{made['id']}")
+    assert r.status_code == 409 and "still has 1 lecture." in r.json()["detail"]
+    ll.delete_lecture(lid)
+    assert c.delete(f"/api/courses/{made['id']}").json() == {"ok": True}
+    assert ll.find_course("CS101") is None and ll.get_deck(did) is None
+    assert not (ll.DATA / "Slides" / "CS101" / "w1.pdf").exists() and not (ll.SLIDE_IMAGES / str(did)).exists()
+    assert c.delete(f"/api/courses/{made['id']}").status_code == 404
+    # writes from another site are refused, like every other write
+    assert c.post("/api/courses", json={"code": "EVIL1"}, headers={"origin": "https://evil.example"}).status_code == 403
+
+
+def test_canvas_courses_suggest_a_code(ll, monkeypatch):
+    listed = [{"id": 1, "name": "Programming Language Concepts", "course_code": "COP4020-12345(23456)"},
+              {"id": 2, "name": "Intro to Comp Sci", "course_code": "CS 101 Fall 2026"},
+              {"id": 3, "name": "Student Success Seminar", "course_code": "UF Quest"}]
+    monkeypatch.setattr(ll, "canvas_get", lambda *a, **k: listed)
+    got = {c["canvas_id"]: c["suggested_code"] for c in ll.canvas_courses()}
+    assert got == {1: "COP4020", 2: "CS101", 3: None}  # no code in it: you type one
