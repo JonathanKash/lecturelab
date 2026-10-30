@@ -26,6 +26,8 @@ You need a Windows 11 laptop and Claude Code signed in to your Claude plan. Lect
 
 If Claude Code isn't installed yet, get it from [claude.com/claude-code](https://claude.com/claude-code) and run `claude` once in a terminal to sign in. Recordings still come in and get transcribed without it; notes wait until it works.
 
+Sign Claude Code in with your Claude Pro or Max plan. If it's signed in to a Claude Console (API) account, or your plan has extra usage turned on, every lecture's notes are billed per use. LectureLab writes notes for each new lecture by itself, so that adds up.
+
 After that, LectureLab starts by itself when you log in, and the desktop shortcut opens it.
 
 **Where things live**
@@ -97,6 +99,14 @@ Nothing extra. Measured on real 50-minute Programming Language Concepts lectures
 
 When Claude Code says the usage limit is reached, the job waits for the reset and carries on. It never falls back to the paid API: LectureLab removes `ANTHROPIC_API_KEY` from Claude Code's environment and refuses to run if the key is still visible.
 
-## Your data stays local
+## What leaves your laptop
 
-Recordings, transcripts, slides, the database, cookies and `.env` live in `data/` and are never committed.
+Everything LectureLab keeps (recordings, transcripts, slides, notes, settings and your Canvas sign-in) stays on your laptop. It sends things out only to do its job:
+
+- **Anthropic**, through Claude Code: each lecture's transcript and slide text, when notes are written.
+- **Google Colab**, only if you set it up: the audio of each batch. The Colab session is shut down when the batch ends, and its disk goes with it. Without Colab, transcription runs on your CPU, and the first time it downloads the Whisper speech model (about 1.6 GB) from Hugging Face.
+- **Canvas, Zoom, Panopto, Kaltura and Google Drive**: LectureLab reads your courses with your own sign-in and downloads recordings from where they're hosted. It never posts anything to Canvas, and it never sees your password.
+
+There's no analytics and no update check. The app only listens on your own computer (127.0.0.1), so other devices on your Wi-Fi can't reach it, and other websites can't use it.
+
+If you work on LectureLab itself: all of that lives in the gitignored `data/` folder and `.env`, so none of it is ever committed.

@@ -38,6 +38,7 @@ from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")  # the Whisper model download sends no usage data
 
 DATA = Path(os.environ.get("LECTURELAB_DATA", ROOT / "data")).resolve()
 DB_PATH = DATA / "lecturelab.db"
