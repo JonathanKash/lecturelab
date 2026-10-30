@@ -867,6 +867,11 @@ def test_canvas_tab_when_not_connected(page):
     page.click("#cv-scan")
     expect(page.locator("#toast")).to_contain_text("isn't connected yet")
     expect(page.locator("#canvas-badge")).to_be_hidden()  # the warning badge is only for an expired session
+    page.set_viewport_size({"width": 375, "height": 800})  # on a phone the auto-pull box stays beside its words
+    box, words = page.evaluate("""() => { const el = document.querySelector('#cv-auto'), r = document.createRange();
+      r.selectNodeContents(el.parentElement); r.setStartAfter(el);
+      return [el.getBoundingClientRect().toJSON(), [...r.getClientRects()].sort((a, b) => b.width - a.width)[0].toJSON()]; }""")
+    assert words["x"] > box["right"] and words["y"] <= box["bottom"], (box, words)
 
 
 def test_bad_link_reports_the_real_error(page):
