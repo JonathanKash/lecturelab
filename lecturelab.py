@@ -5714,6 +5714,9 @@ def create_app():
         log.info("server shutting down")
 
     app = FastAPI(title="LectureLab", version=VERSION, lifespan=lifespan)
+    CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+           "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; "
+           "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
     allowed_hosts = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 
     @app.middleware("http")
@@ -5725,7 +5728,13 @@ def create_app():
         origin = request.headers.get("origin")
         if request.method not in ("GET", "HEAD") and origin and origin.split("//", 1)[-1] not in allowed_hosts:
             return PlainTextResponse("bad origin", status_code=403)
-        return await call_next(request)
+        response = await call_next(request)
+        # Everything the page needs is served from here (KaTeX and fonts included), so a page can't
+        # load script from anywhere else, and can't be framed by another site.
+        response.headers["Content-Security-Policy"] = CSP
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     @app.get("/api/health")
     def health():

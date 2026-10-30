@@ -1676,13 +1676,13 @@ let katexLoad = null;  // KaTeX only loads when a note actually has math in it
 function renderMath(root) {
   const els = $$(".math", root); if (!els.length) return;
   katexLoad ||= new Promise((ok, no) => {
-    const css = Object.assign(document.createElement("link"), { rel: "stylesheet", href: "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" });
-    const js = Object.assign(document.createElement("script"), { src: "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js", onload: ok, onerror: no });
+    const css = Object.assign(document.createElement("link"), { rel: "stylesheet", href: "/static/katex/katex.min.css" });
+    const js = Object.assign(document.createElement("script"), { src: "/static/katex/katex.min.js", onload: ok, onerror: no });
     document.head.append(css, js);
   });
   katexLoad.then(() => els.forEach(el => { if (el.dataset.done) return;
     try { katex.render(el.dataset.tex, el, { throwOnError: false, displayMode: el.classList.contains("display") }); el.dataset.done = 1; } catch {} }),
-    () => { katexLoad = null; });  // offline: the TeX source stays readable, and the next render tries again
+    () => { katexLoad = null; });  // failed to load: the TeX source stays readable, and the next render tries again
 }
 
 const notesBusy = n => ["queued", "writing", "waiting_quota"].includes(n?.state);

@@ -438,7 +438,10 @@ def test_notes_ui_against_stubbed_answers(page):
         route.fulfill(json=n)
     page.route(f"**/api/lectures/{lid}/notes", notes_api)
     page.set_viewport_size({"width": 1440, "height": 900})
-    page.goto(f"{BASE}/#/lecture/{lid}")
+    page.add_init_script("window.cspBlocked = []; document.addEventListener('securitypolicyviolation',"
+                         " e => cspBlocked.push(e.violatedDirective + ' ' + e.blockedURI))")
+    resp = page.goto(f"{BASE}/#/lecture/{lid}")
+    assert "script-src 'self'" in resp.headers["content-security-policy"]
     # no notes yet: the transcript is the open tab, and the notes tab offers to write them
     expect(page.locator("#tab-transcript")).to_have_attribute("aria-selected", "true")
     page.click("#tab-notes")
@@ -462,6 +465,8 @@ def test_notes_ui_against_stubbed_answers(page):
     expect(page.locator("#pane-notes script")).to_have_count(0)
     expect(page.locator(".note-sec:not([id]) li code")).to_have_text("<b>")  # server text is shown, never run as HTML
     expect(page.locator("#pane-notes .math")).to_have_count(2)
+    expect(page.locator("#pane-notes .math .katex")).to_have_count(2)  # drawn by the KaTeX copy in static/
+    assert page.evaluate("cspBlocked") == []
     expect(page.locator("#note-sec-1 .note-meta")).to_have_text("Class logistics")
     expect(page.locator("#note-sec-2 .note-meta")).to_have_text("Slides 1 to 3")  # no slides lined up: plain text, not a button
     expect(page.locator(".note-issues summary")).to_have_text("What the check changed: removed 1 claim, flagged 1")
