@@ -37,7 +37,7 @@ Turns real lecture recordings into notes, flashcards and quizzes good enough to 
 - `lecturelab.py`: all server-side code (config, DB, ingest, transcription, slides, notes, export, sync, FastAPI).
 - `cli.py`: the `lecturelab` command (`serve`, `supervise`, `stop`, `sync`, `notes`, `transcribe`, `slides`, `install-tasks`, ...).
 - `colab/transcribe.py`: runs inside the Colab VM.
-- `static/index.html`: the whole UI. Vanilla JS, with KaTeX from a CDN as the only library. No Node build step.
+- `static/index.html`: the whole UI. Vanilla JS, with KaTeX (vendored in `static/katex/`) as the only library. No Node build step, and the page's CSP allows no outside scripts.
 - `tests/test_unit.py`, `tests/test_e2e.py`: pytest. The e2e suite starts a supervised server on port 8766 with a temp data dir and drives the installed Chrome with Playwright.
 - Code stays consolidated in these files. Split something out only when it's genuinely separate.
 

@@ -113,7 +113,7 @@ The notes are a shorter way to read the same lecture, so they borrow the transcr
 - **Contents:** "In this lecture", with times. At 1280px and wider it sits beside the notes, stays in view and marks the section being read.
 - **Callouts:** told apart by the left rule and a label, not by color. On the exam: solid ink. Emphasized in class: solid pencil. Unclear in the recording: dashed pencil. Check this (added by the fact check): dashed danger.
 - **Code:** sheet background, rule border, mono 13, scrolls sideways with keyboard focus; the language name sits top right. Inline code is a faint ink tint, not a box, so code-heavy paragraphs stay calm.
-- **Math:** KaTeX, loaded from the CDN only when a note has math. Without it the TeX source stays readable.
+- **Math:** KaTeX, shipped in `static/katex/` and loaded only when a note has math. If it fails to load, the TeX source stays readable.
 - **What the check changed:** collapsed at the end. Removed claims are struck through, with where they were and why.
 - **States:** none (what notes are and the two ways to write them), queued and writing (the jobs sweep, with live progress), Claude's usage limit (when it resumes, in local time, plus "Write offline notes instead"), error, and out of date (the server's reason plus "Write the notes again"). Offline notes over Claude's ask before replacing them.
 - Everything from the server is escaped first. Only its Markdown conventions are rendered.

@@ -53,3 +53,4 @@ server.log*
 .playwright-mcp/
 test-results/
 .claude/settings.local.json
+build/
