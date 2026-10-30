@@ -2653,8 +2653,15 @@ def test_stop_and_open_only_count_this_installs_server(ll, monkeypatch, tmp_path
     import io
     answers = {}
     monkeypatch.setattr(cli.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(json.dumps(answers).encode()))
+    python = {7: True}
+    monkeypatch.setattr(cli, "_is_python", lambda pid: python.get(pid, False))
     answers.update(pid=7, root=str(ll.ROOT))
     assert cli._live_server_pid() == 7
+    answers.update(pid=8)  # something else on the port naming a pid that isn't Python: never killed
+    assert cli._live_server_pid() is None
+    answers.update(pid="7; calc")
+    assert cli._live_server_pid() is None
+    answers.update(pid=7)
     answers.update(root=str(tmp_path / "another-copy"))  # e.g. an installed copy while you run a checkout
     assert cli._live_server_pid() is None
     del answers["root"]  # a server from before root was reported
@@ -2741,3 +2748,68 @@ def test_canvas_scan_reads_zoom_cloud_recordings_from_the_zoom_tab(ll, monkeypat
     broken["e"] = ll.CanvasNeedsSignIn("Canvas needs sign-in")
     with pytest.raises(ll.CanvasNeedsSignIn):
         ll.canvas_scan_course(c)
+
+
+def test_links_to_this_computer_or_the_local_network_are_refused(ll, monkeypatch, tmp_path):
+    for url in ("http://127.0.0.1:8765/api/settings", "http://localhost/x", "https://192.168.1.1/Mediasite/Play/"
+                "0123456789abcdef0123456789abcdef1d", "http://[::1]/x", "http://169.254.169.254/latest", "http://10.0.0.5/v"):
+        with pytest.raises(RuntimeError, match="local network"):
+            ll.refuse_local_address(url)
+    ll.refuse_local_address("https://8.8.8.8/video.mp4")  # a public address is fine
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", lambda *a, **k: pytest.fail("yt-dlp must not run"))
+    with pytest.raises(RuntimeError, match="local network"):
+        ll.download_url("http://127.0.0.1:9/recording.mp4", tmp_path)
+
+
+def test_canvas_pagination_stays_on_the_api(ll):
+    for nxt in ('<https://evil.example/api/v1/courses?page=2>; rel="next"',
+                '<https://ufl.instructure.com/courses/1/settings?page=2>; rel="next"'):
+        cs, asked = fake_session(ll, [FakeResponse(200, [{"id": 1}], link=nxt)])
+        with pytest.raises(ll.CanvasError, match="non-API"):
+            cs.get("courses")
+        assert len(asked) == 1  # the foreign link was never fetched
+
+
+def test_warm_only_opens_canvas_pages(ll):
+    cs = ll.CanvasSession()
+    opened = []
+    cs.ctx = type("Ctx", (), {"new_page": lambda self: opened.append(1)})()
+    cs.warm("https://evil.example/courses/1/pages/x")
+    assert opened == []
+
+
+def test_export_never_overwrites_a_file_it_did_not_write(ll):
+    lid = _lec(ll, "Parsing", ll.find_course("COP4020")["id"])
+    ll.update_lecture(lid, date="2026-10-12")
+    lec = ll.get_lecture(lid)
+    notes, _ = ll.export_paths(lec, own=set())
+    notes.parent.mkdir(parents=True, exist_ok=True)
+    notes.write_text("my own notes", encoding="utf-8")  # yours, written before LectureLab exported anything
+    mine, _ = ll.export_paths(lec, own=set())
+    assert mine.name == f"2026-10-12 - Parsing ({lid}).md" and notes.read_text(encoding="utf-8") == "my own notes"
+    again, _ = ll.export_paths(lec, own={str(notes).lower(), str(notes).lower().replace(".md", " - transcript.md")})
+    assert again == notes  # its own earlier export is simply rewritten
+
+
+def test_unsafe_course_codes_and_notes_folders_are_refused(ll):
+    for code in ("COM1", "nul", "LPT9", "CON.X"):
+        with pytest.raises(ValueError, match="device name"):
+            ll.clean_course_code(code)
+    assert ll.clean_course_code("COM3100") == "COM3100"  # a real course code that only starts like one
+    for share in ("\\\\server\\share\\notes", "//server/share/notes"):
+        with pytest.raises(ValueError, match="network share"):
+            ll._check_notes_dir(share)
+
+
+def test_powershell_quoting_survives_curly_quotes(ll):
+    assert ll.ps_quote_body("O\u2019Brien's \u2018x\u201a\u201b") == "O\u2019\u2019Brien''s \u2018\u2018x\u201a\u201a\u201b\u201b"
+
+
+def test_uploads_over_the_cap_are_refused_and_removed(ll, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(ll, "MAX_DOWNLOAD_BYTES", 3 << 20)
+    c = TestClient(ll.create_app(), base_url=f"http://127.0.0.1:{ll.PORT}")
+    r = c.post("/api/recordings/upload", files={"file": ("big.mp4", b"x" * (4 << 20), "video/mp4")})
+    assert r.status_code == 413
+    assert not list((ll.DATA / "uploads").glob("*"))

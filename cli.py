@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -91,7 +92,18 @@ def _live_server_pid() -> int | None:
     root = h.get("root")
     if root and os.path.normcase(os.path.realpath(root)) != os.path.normcase(os.path.realpath(ll.ROOT)):
         return None
-    return h["pid"]
+    try:
+        pid = int(h["pid"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    # Whatever answers on the port names the pid `stop` kills: only believe it if that's Python
+    return pid if _is_python(pid) else None
+
+
+def _is_python(pid: int) -> bool:
+    r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                       creationflags=NO_WINDOW)
+    return bool(re.match(r'"pythonw?\.exe"', r.stdout.strip(), re.I))
 
 
 def cmd_stop(args) -> int:
@@ -329,8 +341,8 @@ def _ps(script: str) -> subprocess.CompletedProcess:
 
 
 def _q(path) -> str:
-    """Quote for a PowerShell single-quoted string."""
-    return "'" + str(path).replace("'", "''") + "'"
+    """Quote for a PowerShell single-quoted string (curly quotes end one too, as in O\u2019Brien)."""
+    return "'" + ll.ps_quote_body(path) + "'"
 
 
 def server_task_script() -> str:

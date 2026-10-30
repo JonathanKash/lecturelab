@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date as Date, datetime, timedelta, timezone
@@ -212,7 +213,7 @@ def run(cmd: list, timeout: float = 2 * 3600, low: bool = False, **kw) -> subpro
 
 
 def ffprobe(path: Path) -> dict:
-    out = run([find_tool("ffprobe"), "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
+    out = run([find_tool("ffprobe"), "-v", "error", "-protocol_whitelist", "file", "-print_format", "json", "-show_format", "-show_streams", path],
               timeout=120).stdout
     info = json.loads(out)
     streams = info.get("streams", [])
@@ -701,6 +702,8 @@ def clean_course_code(code: str) -> str:
     code = re.sub(r"\s+", "", code or "").upper()
     if not COURSE_CODE_RE.fullmatch(code):
         raise ValueError("A course code is 3 to 20 letters and digits with at least one letter, like COP4020 or CS101.")
+    if re.fullmatch(r"(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?", code):
+        raise ValueError(f"Windows reserves {code} as a device name, so it can't be a folder. Add a letter or digit.")
     return code
 
 
@@ -872,7 +875,7 @@ def run_job(job: dict) -> None:
     except RetryLater as e:  # the job re-queued itself with a retry time; leave that in place
         log.info("job %s %s deferred: %s", job["id"], job["kind"], e)
     except Exception as e:
-        log.exception("job %s %s failed", job["id"], job["kind"])
+        log.error("job %s %s failed: %s", job["id"], job["kind"], scrub_urls(traceback.format_exc()))
         job_update(job["id"], status="error", error=scrub_urls(str(e))[:4000], progress=None, payload=scrubbed)
 
 
@@ -915,7 +918,7 @@ def sha256_file(path: Path) -> str:
 def normalize_audio(src: Path, dst: Path) -> None:
     """16 kHz mono FLAC: lossless, about half the size of WAV, plays in Chrome, decodes everywhere."""
     tmp = dst.with_suffix(".tmp.flac")
-    run([find_tool("ffmpeg"), "-v", "error", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000",
+    run([find_tool("ffmpeg"), "-v", "error", "-y", "-protocol_whitelist", "file", "-i", src, "-vn", "-ac", "1", "-ar", "16000",
          "-sample_fmt", "s16", "-c:a", "flac", tmp])
     tmp.replace(dst)
 
@@ -1174,9 +1177,33 @@ def _canvas_host() -> str:
 _DRIVE_FILE_ID = re.compile(r"(?:/file/(?:u/\d+/)?d/|[?&]id=)([\w-]{20,})")
 
 
+def refuse_local_address(url: str) -> None:
+    """Raise if the link's host is this computer or the local network. Links come from Canvas pages
+    and announcements anyone in a course may write, so one must not reach your router or other
+    services on your machine. (A redirect isn't checked: this stops the direct case.)"""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    host = urlsplit(url).hostname
+    if not host:
+        raise RuntimeError(f"that link has no host: {url}")
+    try:
+        addrs = {a[4][0] for a in socket.getaddrinfo(host, None)}
+    except (socket.gaierror, UnicodeError):
+        return  # doesn't resolve: the download fails with its own message
+    for a in addrs:
+        ip = ipaddress.ip_address(a.split("%")[0])
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified \
+                or ip.is_multicast:
+            raise RuntimeError(f"{host} is on this computer or your local network. "
+                               "LectureLab only downloads recordings from the internet.")
+
+
 def download_url(url: str, dest: Path, passcode: str | None = None, progress=None,
                  cookiefile: Path | None = None) -> list[tuple[Path, dict]]:
     """Fetch a URL into dest. Returns [(file, metadata)]. Errors carry the tool's own message."""
+    refuse_local_address(url)
     dest.mkdir(parents=True, exist_ok=True)
     if classify_url(url) == "drive":
         import gdown
@@ -1205,6 +1232,7 @@ def download_url(url: str, dest: Path, passcode: str | None = None, progress=Non
         "noplaylist": True, "playlistend": 1, "quiet": True, "no_warnings": True, "noprogress": True,
         "js_runtimes": {"node": {}},  # YouTube needs a JS runtime; Node is installed
         "retries": 5, "fragment_retries": 10,
+        "max_filesize": MAX_DOWNLOAD_BYTES,
     }
     if passcode:
         opts["videopassword"] = passcode
@@ -1590,11 +1618,17 @@ def set_canvas_state(state: str, **info) -> None:
                "Your Canvas session expired. Open LectureLab and click Connect Canvas. Inbox folders still work.")
 
 
+def ps_quote_body(s: str) -> str:
+    """Escape text for inside a PowerShell single-quoted string. PowerShell ends one at a curly
+    quote too (O\u2019Brien), and doubling any of them is the escape."""
+    return "".join(c * 2 if c in "'\u2018\u2019\u201a\u201b" else c for c in str(s))
+
+
 def notify(title: str, body: str) -> None:
     """Best-effort Windows toast. Off in tests (LECTURELAB_NOTIFY=off)."""
     if os.environ.get("LECTURELAB_NOTIFY") == "off" or os.name != "nt":
         return
-    esc_ = lambda t: t.replace("&", "&amp;").replace("<", "&lt;").replace("'", "''")  # noqa: E731
+    esc_ = lambda t: ps_quote_body(t.replace("&", "&amp;").replace("<", "&lt;"))  # noqa: E731
     script = f"""
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
@@ -1725,6 +1759,8 @@ class CanvasSession:
                 return data
             out.extend(data)
             url = _next_link(r.headers.get("link"))
+            if url and not url.startswith(base + "/api/v1/"):
+                raise CanvasError(f"refusing a non-API Canvas URL in pagination: {url.split('?')[0]}")
         return out
 
     def whoami(self, quiet_auth: bool = False) -> dict:
@@ -1735,6 +1771,10 @@ class CanvasSession:
     def warm(self, url: str) -> None:
         """Open a Canvas page so embedded players (Kaltura, Panopto) run their LTI sign-in and
         set their own cookies in this profile."""
+        from urllib.parse import urlsplit
+        if (urlsplit(url).hostname or "").lower() != (urlsplit(canvas_base()).hostname or "").lower():
+            log.warning("not opening %s: it isn't a page on your Canvas", url.split("?")[0])
+            return
         page = self.ctx.new_page()
         try:
             page.goto(url, wait_until="networkidle", timeout=60_000)
@@ -1854,10 +1894,10 @@ def canvas_courses() -> list[dict]:
 # Embedded players we know how to fetch. Each regex captures enough to build a stable key.
 _EMBEDS = [
     ("kaltura", re.compile(r"(?:entry_?id[/=]|entryid%2F|/entryId/)(\d_[a-z0-9]{8})", re.I)),
-    ("panopto", re.compile(r"https?://[\w.-]*panopto\.com/Panopto/Pages/(?:Viewer|Embed)\.aspx\?(?:[^\"'<> ]*&)?id=([0-9a-f-]{36})", re.I)),
+    ("panopto", re.compile(r"https?://(?:[\w-]+\.)*panopto\.com/Panopto/Pages/(?:Viewer|Embed)\.aspx\?(?:[^\"'<> ]*&)?id=([0-9a-f-]{36})", re.I)),
     ("mediasite", re.compile(r"https?://[\w.-]+/Mediasite/Play/([0-9a-f]{32,34})", re.I)),
     ("youtube", re.compile(r"(?:youtube(?:-nocookie)?\.com/(?:embed/|watch\?v=)|youtu\.be/)([\w-]{11})", re.I)),
-    ("zoom", re.compile(r"https?://[\w.-]*zoom\.us/rec/(?:share|play)/[\w.\-~%]+", re.I)),
+    ("zoom", re.compile(r"https?://(?:[\w-]+\.)*zoom\.us/rec/(?:share|play)/[\w.\-~%]+", re.I)),
     ("media_object", re.compile(r"media_objects(?:_iframe)?/(m-[\w]+)", re.I)),
     # Some courses keep recordings in a shared Google Drive folder linked from a module.
     ("drive_folder", re.compile(r"drive\.google\.com/drive/(?:u/\d+/)?folders/([\w-]{20,})", re.I)),
@@ -2401,6 +2441,8 @@ def _clean_canvas_base(v: str) -> str:
 
 def _check_notes_dir(v: str) -> str:
     p = Path(os.path.expandvars(v)).expanduser()
+    if str(p).startswith(("\\\\", "//")):
+        raise ValueError("Pick a folder on this computer, not a network share.")
     if not p.is_absolute():
         raise ValueError("Give the whole folder path, starting with the drive, like C:\\Users\\you\\Documents\\Notes.")
     try:  # made now, and written to once, so a bad choice shows up here and not at the next export
@@ -2456,7 +2498,7 @@ def store_transcript(lecture_id: int, result: dict, source: str) -> int:
 def load_audio_array(path: Path):
     """16 kHz float32 via ffmpeg (not PyAV: some PyAV releases break faster-whisper's decoder)."""
     import numpy as np
-    raw = run([find_tool("ffmpeg"), "-nostdin", "-v", "error", "-i", path, "-f", "f32le", "-ac", "1",
+    raw = run([find_tool("ffmpeg"), "-nostdin", "-v", "error", "-protocol_whitelist", "file", "-i", path, "-f", "f32le", "-ac", "1",
                "-ar", "16000", "-"]).stdout
     return np.frombuffer(raw, np.float32)
 
@@ -2941,6 +2983,7 @@ SLIDES_DIR = DATA / "Slides"          # decks as downloaded, per course: Slides/
 SLIDE_IMAGES = DATA / "slide-images"  # page renders per deck (not "slides": Windows paths ignore case)
 THUMB_W, FULL_W = 320, 1280
 MAX_DECK_MB = int(os.environ.get("LECTURELAB_MAX_DECK_MB", 200))
+MAX_DOWNLOAD_BYTES = int(os.environ.get("LECTURELAB_MAX_DOWNLOAD_GB", 8)) << 30  # one recording, upload or download
 WINDOW_SEC = 30                       # transcript window compared against slide text
 MATCH_MIN, MATCH_MARGIN = 0.45, 0.1   # auto-match only a clear winner
 OCR_MAX_SCREENS = 150
@@ -5293,13 +5336,19 @@ def _export_name(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s).strip(" .")[:120].strip(" .")
 
 
-def export_paths(lec: dict, taken: set[str] = frozenset()) -> tuple[Path, Path]:
+def export_paths(lec: dict, taken: set[str] = frozenset(), own: set[str] | None = None) -> tuple[Path, Path]:
     """Where a lecture's notes and transcript go. Two lectures with the same date and title get the
-    lecture id added rather than overwrite each other ("taken": other lectures' files, lowercase)."""
+    lecture id added rather than overwrite each other ("taken": other lectures' files, lowercase).
+    With `own` (this lecture's earlier exports), a file already there that it didn't write, such as
+    your own note with that name, is never overwritten either."""
     folder = notes_dir() / (_export_name(lec["course_code"] or "") or "Unsorted")
     date = lec["date"] or (lec["created_at"] or "")[:10]
     base = _export_name(f"{date} - {lec['title']}") or f"Lecture {lec['id']}"
-    if str(folder / f"{base}.md").lower() in taken:
+
+    def clash(b):
+        return any(str(p).lower() in taken or (own is not None and str(p).lower() not in own and p.exists())
+                   for p in (folder / f"{b}.md", folder / f"{b} - Transcript.md"))
+    if clash(base):
         base += f" ({lec['id']})"
     return folder / f"{base}.md", folder / f"{base} - Transcript.md"
 
@@ -5334,7 +5383,7 @@ def export_lecture(lecture_id: int) -> list[Path]:
         others = _others_exports(con, lecture_id)
     if not n:
         return []
-    notes_path, tr_path = export_paths(lec, others)
+    notes_path, tr_path = export_paths(lec, others, {p.lower() for p in json.loads(n["export_paths"] or "[]")})
     deck = get_deck(lec["deck_id"])
     source = next((s["url"] for s in lec["sources"] if (s["url"] or "").startswith("http")), None)
     dur = max([lec["duration_sec"] or 0] + [s["end"] for s in segs])
@@ -5677,7 +5726,11 @@ def _sweep_orphans_forever() -> None:
 def start_background(watch_inboxes: bool = True) -> None:
     requeue_orphaned_jobs()
     reset_stuck_transcribing()
-    if COLAB_ENABLED:  # off the startup path: WSL can take a few seconds to wake
+    for f in (DATA / "secrets").glob("cookies-job*.txt"):  # a crash skipped its job's cleanup
+        f.unlink(missing_ok=True)
+    if COLAB_ENABLED and meta_get("colab_usage_raw") is not None:
+        # Off the startup path, since WSL takes a few seconds to wake; and only once Colab has been
+        # used, so a laptop that never set it up doesn't boot WSL at every logon.
         threading.Thread(target=sweep_orphans_if_idle, daemon=True, name="colab-sweep").start()
     if ORPHAN_SWEEP_SEC > 0 and "orphans" not in WORKERS:  # 0 turns it off (the unit tests)
         WORKERS["orphans"] = threading.Thread(target=_sweep_orphans_forever, daemon=True, name="orphan-sweep")
@@ -5817,7 +5870,10 @@ def create_app():
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(dest, "wb") as out:
-                shutil.copyfileobj(file.file, out, 1 << 20)
+                while chunk := file.file.read(1 << 20):
+                    if out.tell() + len(chunk) > MAX_DOWNLOAD_BYTES:
+                        raise HTTPException(413, f"that file is over {MAX_DOWNLOAD_BYTES >> 30} GB")
+                    out.write(chunk)
         except BaseException:
             dest.unlink(missing_ok=True)  # an aborted upload leaves nothing behind
             raise
