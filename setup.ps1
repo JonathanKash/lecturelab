@@ -89,7 +89,7 @@ function Winget-Install($id, $name, [string[]]$extra = @()) {
         Fail "winget isn't available, so $name can't be installed. Install 'App Installer' from the Microsoft Store, then run setup.cmd again."
     }
     Say "Installing $name with winget..."
-    Native { & winget install --id $id -e --silent --accept-source-agreements --accept-package-agreements @extra }
+    Native { & winget install --id $id -e --source winget --silent --accept-source-agreements --accept-package-agreements @extra }
     Update-Path  # the exit code isn't trusted ("already installed" is an error too): the caller looks again
 }
 function Task-Owner {  # which cli.py the server task runs, or $null when there's no task
@@ -109,6 +109,18 @@ if (-not [IO.Path]::IsPathRooted($InstallDir)) { $InstallDir = Join-Path (Get-Lo
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
 if ($InstallDir.Length -gt 3) { $InstallDir = $InstallDir.TrimEnd('\') }  # a trailing \ would escape the closing quote in pip's argument
 Say "LectureLab setup. Installing to $InstallDir"
+# Only inside your own user folders, where other accounts on this PC can't change the code that runs
+# as you at logon; and only into an empty folder or an earlier LectureLab, because setup mirrors
+# and clears folders inside it. (A managed PC may keep AppData apart from the profile.)
+$roots = @($env:USERPROFILE, $env:LOCALAPPDATA) | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
+if (-not ($roots | Where-Object { $InstallDir.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) })) {
+    Fail "Install LectureLab inside your user folder ($($roots[0])), not $InstallDir. Other accounts on this PC could change files outside it."
+}
+$earlier = @('lecturelab.py', 'cli.py', 'pyproject.toml') | Where-Object { -not (Test-Path -LiteralPath (Join-Path $InstallDir $_)) }
+if ((Test-Path -LiteralPath $InstallDir) -and $earlier -and
+        (Get-ChildItem -LiteralPath $InstallDir -Force | Select-Object -First 1)) {
+    Fail "$InstallDir already has other files in it. Pick an empty folder, or leave out -InstallDir to use the default."
+}
 
 # ---- what this computer has
 Step 'Checking this computer'
@@ -129,7 +141,8 @@ try {
 $python = Find-Python
 $ffmpeg = Find-Ffmpeg
 $office = Find-LibreOffice
-$claude = [bool](Get-Command claude -ErrorAction SilentlyContinue)
+# The way the app looks for it: claude.exe itself, since a .cmd shim (an npm install) mangles its prompt
+$claude = (Test-Path -LiteralPath "$env:USERPROFILE\.local\bin\claude.exe") -or [bool](Get-Command claude.exe -ErrorAction SilentlyContinue)
 Say ("  Python 3.13   " + $(if ($python) { "found ($python)" } else { 'missing' }))
 Say ("  ffmpeg        " + $(if ($ffmpeg) { 'found' } else { 'missing' }))
 Say ("  LibreOffice   " + $(if ($office) { 'found' } else { 'missing (only needed for PowerPoint slides)' }))
@@ -195,7 +208,8 @@ if (Same-Path $Src $InstallDir) {
     Say 'Running from the installed copy: nothing to copy.'
 } else {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    $files = @('lecturelab.py', 'cli.py', 'pyproject.toml', 'README.md', '.env.example', 'setup.ps1', 'setup.cmd')
+    $files = @('lecturelab.py', 'cli.py', 'pyproject.toml', 'requirements.lock', 'README.md', 'LICENSE', '.env.example',
+               'setup.ps1', 'setup.cmd')
     foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $Src $f) -Destination (Join-Path $InstallDir $f) -Force }
     foreach ($d in @('static', 'colab')) {  # mirrored: these folders hold only code
         Native { & robocopy (Join-Path $Src $d) (Join-Path $InstallDir $d) /MIR /NJH /NJS /NFL /NDL /NP } | Out-Null
@@ -212,7 +226,15 @@ if (Same-Path $Src $InstallDir) {
 Step 'Setting up Python packages (the first time takes a few minutes)'
 $fresh = -not (Test-Python $venvPy)  # missing, the wrong Python, or broken (its base Python was uninstalled)
 if ($fresh) { Run 'Creating the Python environment' { & $python -m venv --clear (Join-Path $InstallDir '.venv') } }
-Run 'Installing packages' { & $venvPy -m pip install --disable-pip-version-check --quiet -e $InstallDir }
+# The exact versions that were tested, each checked against its sha256 (requirements.lock), so a package
+# replaced on PyPI after this release can't get in. Then LectureLab itself, which needs nothing more, and
+# yt-dlp, which floats on purpose: sites change and old versions stop working.
+$pip = @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet')
+# Wheels only: building from source would fetch build tools that no hash covers.
+Run 'Installing packages' { & $venvPy @pip --require-hashes --no-deps --only-binary=:all: -r (Join-Path $InstallDir 'requirements.lock') }
+Run 'Installing LectureLab' { & $venvPy @pip --no-deps --no-build-isolation -e $InstallDir }
+Run 'Installing yt-dlp' { & $venvPy @pip --upgrade --no-deps 'yt-dlp>=2026.10.26' }  # a new dependency fails pip check, not slips in
+Run 'Checking the packages' { & $venvPy -m pip check }
 Run "Installing LectureLab's browser (for Canvas)" { & $venvPy -m playwright install chromium }
 
 # ---- background tasks, shortcut, first window

@@ -2813,3 +2813,25 @@ def test_uploads_over_the_cap_are_refused_and_removed(ll, monkeypatch):
     r = c.post("/api/recordings/upload", files={"file": ("big.mp4", b"x" * (4 << 20), "video/mp4")})
     assert r.status_code == 413
     assert not list((ll.DATA / "uploads").glob("*"))
+
+
+def test_the_release_lock_covers_every_dependency_with_hashes(ll):
+    import re
+    import tomllib
+    lock = (ll.ROOT / "requirements.lock").read_text(encoding="utf-8")
+    entries = re.split(r"\n(?=[A-Za-z])", lock.split("\n\n", 1)[1].strip())
+    names = set()
+    for e in entries:
+        name, _, rest = e.partition("==")
+        assert "--hash=sha256:" in rest, name  # setup installs with --require-hashes
+        names.add(re.sub(r"[-_.]+", "-", name).lower())
+    deps = tomllib.loads((ll.ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    for d in deps:
+        n = re.sub(r"[-_.]+", "-", re.match(r"[A-Za-z0-9._-]+", d)[0]).lower()
+        assert n in names or n == "yt-dlp", n  # yt-dlp floats on purpose
+    assert "yt-dlp" not in names and "pip" not in names and "setuptools" in names  # setuptools: the -e build
+
+
+def test_setup_scripts_stay_ascii(ll):
+    for f in ("setup.ps1", "setup.cmd"):  # Windows PowerShell 5.1 reads a file without a BOM as ANSI
+        assert all(b < 128 for b in (ll.ROOT / f).read_bytes()), f

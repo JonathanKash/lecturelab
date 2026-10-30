@@ -52,3 +52,4 @@ Turns real lecture recordings into notes, flashcards and quizzes good enough to 
 ## Working rules
 - Test every stage end to end in a real browser with Playwright against the running server, using a real 5 to 10 minute lecture clip (gitignored `data/fixtures/`), not a synthetic tone.
 - Commit after each working stage. Short imperative subject, one logical change per commit.
+- Releases: after changing dependencies, rebuild `requirements.lock` with `tools/make_lock.py` (exact tested versions with sha256 hashes; setup.ps1 installs with `--require-hashes`, and yt-dlp floats outside it), then run setup.cmd into a fresh folder before tagging.
